@@ -1,0 +1,11 @@
+
+Showing Recent Issues
+
+1V1-Mobile
+Source files for target 1V1Mobile should be located under 'Sources/1V1Mobile', or a custom sources path can be set with the 'path' property in Package.swift
+
+Source files for target 1V1Mobile should be located under 'Sources/1V1Mobile', or a custom sources path can be set with the 'path' property in Package.swift
+
+
+
+Resolving Package Graph Failed    8/17/25, 5:10 PM    66.7 seconds
