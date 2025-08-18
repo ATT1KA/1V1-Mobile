@@ -6,12 +6,17 @@ struct ContentView: View {
     var body: some View {
         Group {
             if authService.isAuthenticated {
-                MainTabView()
+                if authService.showOnboarding {
+                    OnboardingView()
+                } else {
+                    MainTabView()
+                }
             } else {
                 AuthView()
             }
         }
         .animation(.easeInOut, value: authService.isAuthenticated)
+        .animation(.easeInOut, value: authService.showOnboarding)
     }
 }
 
