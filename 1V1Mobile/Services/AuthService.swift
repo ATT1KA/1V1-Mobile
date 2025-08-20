@@ -497,7 +497,19 @@ class AppleSignInDelegate: NSObject, ASAuthorizationControllerDelegate, ASAuthor
     func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
         guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
               let window = windowScene.windows.first else {
-            fatalError("No window available")
+            // ✅ Graceful fallback instead of crash
+            print("Warning: No window available for Apple Sign-In presentation")
+            
+            // Try to find any available window
+            if let fallbackWindow = UIApplication.shared.windows.first {
+                return fallbackWindow
+            }
+            
+            // Last resort: create a temporary window
+            let tempWindow = UIWindow(frame: UIScreen.main.bounds)
+            tempWindow.rootViewController = UIViewController()
+            tempWindow.makeKeyAndVisible()
+            return tempWindow
         }
         return window
     }

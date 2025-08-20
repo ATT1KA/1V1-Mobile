@@ -20,6 +20,27 @@ class NFCService: NSObject, ObservableObject {
         stopScanning()
     }
     
+    // MARK: - Enhanced Error Handling
+    private func getUserFriendlyErrorMessage(_ error: Error) -> String {
+        if let nfcError = error as? NFCReaderError {
+            switch nfcError.code {
+            case .readerSessionInvalidationErrorFirstNDEFTagRead:
+                return "NFC tag read successfully"
+            case .readerSessionCancelationError:
+                return "NFC scanning cancelled"
+            case .readerSessionInvalidationErrorUserCanceled:
+                return "NFC scanning cancelled by user"
+            case .readerSessionInvalidationErrorSessionTerminatedUnexpectedly:
+                return "NFC session ended unexpectedly"
+            case .readerSessionInvalidationErrorSessionTimeout:
+                return "NFC session timed out"
+            default:
+                return "NFC error: \(nfcError.localizedDescription)"
+            }
+        }
+        return "NFC error: \(error.localizedDescription)"
+    }
+    
     // MARK: - NFC Reading
     func startScanning() {
         guard NFCNDEFReaderSession.readingAvailable else {
@@ -197,7 +218,7 @@ extension NFCService: NFCNDEFReaderSessionDelegate {
         session.connect(to: tag) { error in
             if let error = error {
                 DispatchQueue.main.async {
-                    self.errorMessage = "Failed to connect to NFC tag: \(error.localizedDescription)"
+                    self.errorMessage = "Failed to connect to NFC tag: \(self.getUserFriendlyErrorMessage(error))"
                 }
                 session.invalidate()
                 return
@@ -207,7 +228,7 @@ extension NFCService: NFCNDEFReaderSessionDelegate {
             tag.queryNDEFStatus { status, capacity, error in
                 if let error = error {
                     DispatchQueue.main.async {
-                        self.errorMessage = "Failed to query NFC tag: \(error.localizedDescription)"
+                        self.errorMessage = "Failed to query NFC tag: \(self.getUserFriendlyErrorMessage(error))"
                     }
                     session.invalidate()
                     return
@@ -236,7 +257,7 @@ extension NFCService: NFCNDEFReaderSessionDelegate {
                     tag.writeNDEF(ndefMessage) { error in
                         DispatchQueue.main.async {
                             if let error = error {
-                                self.errorMessage = "Failed to write to NFC tag: \(error.localizedDescription)"
+                                self.errorMessage = "Failed to write to NFC tag: \(self.getUserFriendlyErrorMessage(error))"
                             } else {
                                 self.errorMessage = nil
                                 session.alertMessage = "Profile written successfully!"
@@ -249,7 +270,7 @@ extension NFCService: NFCNDEFReaderSessionDelegate {
                     tag.readNDEF { message, error in
                         if let error = error {
                             DispatchQueue.main.async {
-                                self.errorMessage = "Failed to read NFC tag: \(error.localizedDescription)"
+                                self.errorMessage = "Failed to read NFC tag: \(self.getUserFriendlyErrorMessage(error))"
                             }
                             session.invalidate()
                             return

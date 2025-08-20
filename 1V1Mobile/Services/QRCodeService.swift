@@ -14,15 +14,50 @@ class QRCodeService: ObservableObject {
     private let supabaseService = SupabaseService.shared
     private let context = CIContext()
     
+    // MARK: - Performance Optimization
+    private var qrCodeCache: [String: UIImage] = [:]
+    
+    // MARK: - Enhanced QR Code Validation
+    private func validateQRCodeData(_ data: String) -> Bool {
+        // Check for minimum data length
+        guard data.count >= 10 else {
+            errorMessage = "QR code data too short"
+            return false
+        }
+        
+        // Check for maximum data length
+        guard data.count <= 3000 else {
+            errorMessage = "QR code data too large"
+            return false
+        }
+        
+        // Check for valid characters (printable ASCII)
+        guard data.range(of: "^[\\x20-\\x7E]+$", options: .regularExpression) != nil else {
+            errorMessage = "QR code contains invalid characters"
+            return false
+        }
+        
+        return true
+    }
+    
     // MARK: - QR Code Generation
     func generateQRCode(for profile: UserProfile) {
+        // Create cache key based on profile data
+        let profileKey = "\(profile.userId)_\(profile.updatedAt.timeIntervalSince1970)"
+        
+        // Check cache first
+        if let cachedImage = qrCodeCache[profileKey] {
+            generatedQRImage = cachedImage
+            errorMessage = nil
+            return
+        }
+        
         do {
             let profileData = try JSONEncoder().encode(profile)
             let profileString = String(data: profileData, encoding: .utf8) ?? ""
             
-            // Validate QR code size (max ~3KB for reliable scanning)
-            if profileString.count > 3000 {
-                errorMessage = "Profile data too large for QR code. Consider using URL-based sharing."
+            // Enhanced validation
+            guard validateQRCodeData(profileString) else {
                 return
             }
             
@@ -48,6 +83,9 @@ class QRCodeService: ObservableObject {
             
             generatedQRImage = UIImage(cgImage: cgImage)
             errorMessage = nil
+            
+            // Cache the generated QR code
+            qrCodeCache[profileKey] = generatedQRImage
             
         } catch {
             errorMessage = "Error generating QR code: \(error.localizedDescription)"
@@ -110,6 +148,11 @@ class QRCodeService: ObservableObject {
     func processScannedCode(_ code: String) {
         // Clear previous errors
         errorMessage = nil
+        
+        // Enhanced validation
+        guard validateQRCodeData(code) else {
+            return
+        }
         
         // Try to parse as JSON profile data first
         if let jsonData = code.data(using: .utf8),
@@ -193,6 +236,10 @@ class QRCodeService: ObservableObject {
     func clearScannedProfile() {
         scannedProfile = nil
         errorMessage = nil
+    }
+    
+    func clearCache() {
+        qrCodeCache.removeAll()
     }
     
     // MARK: - QR Code Validation
