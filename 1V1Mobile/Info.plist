@@ -44,7 +44,12 @@
 	<key>UIRequiredDeviceCapabilities</key>
 	<array>
 		<string>armv7</string>
+		<string>nfc</string>
 	</array>
+	<key>NFCReaderUsageDescription</key>
+	<string>This app uses NFC to share and scan player profiles with other users.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>This app uses the camera to scan QR codes for sharing player profiles.</string>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
