@@ -7,7 +7,7 @@ struct ContentView: View {
         Group {
             if authService.isAuthenticated {
                 if authService.showOnboarding {
-                    OnboardingView()
+                    OnboardingFlowView()
                 } else {
                     MainTabView()
                 }

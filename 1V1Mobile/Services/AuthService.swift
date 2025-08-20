@@ -313,7 +313,7 @@ class AuthService: ObservableObject {
         }
     }
     
-    func completeOnboarding(username: String, avatarUrl: String? = nil) async -> Bool {
+    func completeOnboarding(username: String, avatarUrl: String? = nil, stats: UserStats? = nil, cardData: (name: String, description: String, rarity: CardRarity)? = nil) async -> Bool {
         guard let client = supabaseService.getClient(),
               let user = currentUser else {
             errorMessage = "User not authenticated"
@@ -328,14 +328,67 @@ class AuthService: ObservableObject {
                     "id": user.id,
                     "username": username,
                     "avatar_url": avatarUrl,
+                    "stats": stats?.dictionary,
                     "updated_at": ISO8601DateFormatter().string(from: Date())
                 ])
                 .execute()
             
+            // Create user card if provided
+            if let cardData = cardData {
+                let cardId = UUID().uuidString
+                
+                do {
+                    try await client.database
+                        .from("user_cards")
+                        .insert([
+                            "id": cardId,
+                            "user_id": user.id,
+                            "card_name": cardData.name,
+                            "card_description": cardData.description,
+                            "rarity": cardData.rarity.rawValue,
+                            "power": cardData.rarity.power + Int.random(in: 0...20),
+                            "is_active": true
+                        ])
+                        .execute()
+                    
+                    // Update profile with card ID
+                    try await client.database
+                        .from("profiles")
+                        .update(["card_id": cardId])
+                        .eq("id", value: user.id)
+                        .execute()
+                        
+                } catch let cardError as PostgrestError {
+                    switch cardError {
+                    case .httpError(let httpError):
+                        if httpError.status == 404 {
+                            errorMessage = "Database setup required. Please run the database setup script in Supabase."
+                        } else {
+                            errorMessage = "Failed to create card: \(httpError.message)"
+                        }
+                    default:
+                        errorMessage = "Failed to create card: \(cardError.localizedDescription)"
+                    }
+                    return false
+                }
+            }
+            
             showOnboarding = false
             return true
+        } catch let profileError as PostgrestError {
+            switch profileError {
+            case .httpError(let httpError):
+                if httpError.status == 404 {
+                    errorMessage = "Database setup required. Please run the database setup script in Supabase."
+                } else {
+                    errorMessage = "Failed to update profile: \(httpError.message)"
+                }
+            default:
+                errorMessage = "Failed to update profile: \(profileError.localizedDescription)"
+            }
+            return false
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = "Unexpected error: \(error.localizedDescription)"
             return false
         }
     }
@@ -354,6 +407,79 @@ class AuthService: ObservableObject {
             return true
         } catch {
             errorMessage = error.localizedDescription
+            return false
+        }
+    }
+    
+    func updateProfileImage(_ image: UIImage) async -> Bool {
+        guard let client = supabaseService.getClient(),
+              let userId = currentUser?.id else {
+            errorMessage = "User not authenticated"
+            return false
+        }
+        
+        do {
+            // Compress image
+            guard let imageData = image.jpegData(compressionQuality: 0.7) else {
+                errorMessage = "Failed to process image"
+                return false
+            }
+            
+            // Generate unique filename
+            let filename = "\(userId)_\(UUID().uuidString).jpg"
+            
+            // Upload to Supabase Storage
+            let storageResponse = try await client.storage
+                .from("avatars")
+                .upload(
+                    path: filename,
+                    file: imageData,
+                    options: FileOptions(contentType: "image/jpeg")
+                )
+            
+            // Get public URL
+            let publicURL = client.storage
+                .from("avatars")
+                .getPublicURL(path: filename)
+            
+            // Update profile with new avatar URL
+            try await client.database
+                .from("profiles")
+                .update(["avatar_url": publicURL.absoluteString])
+                .eq("id", value: userId)
+                .execute()
+            
+            // Update current user
+            if var updatedUser = currentUser {
+                updatedUser = User(
+                    id: updatedUser.id,
+                    email: updatedUser.email,
+                    createdAt: updatedUser.createdAt,
+                    updatedAt: updatedUser.updatedAt,
+                    username: updatedUser.username,
+                    avatarUrl: publicURL.absoluteString,
+                    isOnline: updatedUser.isOnline,
+                    lastSeen: updatedUser.lastSeen,
+                    stats: updatedUser.stats,
+                    cardId: updatedUser.cardId
+                )
+                currentUser = updatedUser
+            }
+            
+            return true
+        } catch let storageError as StorageError {
+            errorMessage = "Failed to upload image: \(storageError.localizedDescription)"
+            return false
+        } catch let postgrestError as PostgrestError {
+            switch postgrestError {
+            case .httpError(let httpError):
+                errorMessage = "Failed to update profile: \(httpError.message)"
+            default:
+                errorMessage = "Failed to update profile: \(postgrestError.localizedDescription)"
+            }
+            return false
+        } catch {
+            errorMessage = "Unexpected error: \(error.localizedDescription)"
             return false
         }
     }

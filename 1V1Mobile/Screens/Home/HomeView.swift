@@ -2,12 +2,20 @@ import SwiftUI
 
 struct HomeView: View {
     @EnvironmentObject var authService: AuthService
+    @StateObject private var profileService = UserProfileService()
     @State private var isLoading = false
     
     var body: some View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 20) {
+                    // Player Card Section
+                    if let user = authService.currentUser {
+                        PlayerCard3DView(user: user, profileService: profileService)
+                            .environmentObject(authService)
+                            .padding(.top, 4)
+                    }
+                    
                     // Welcome Section
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Welcome back!")
@@ -89,16 +97,23 @@ struct HomeView: View {
             .navigationTitle("Home")
             .navigationBarTitleDisplayMode(.large)
             .refreshable {
-                // Handle pull to refresh
                 await refreshData()
+            }
+            .onAppear {
+                Task {
+                    if let id = authService.currentUser?.id {
+                        await profileService.fetchUserProfile(userId: id)
+                    }
+                }
             }
         }
     }
     
     private func refreshData() async {
         isLoading = true
-        // Simulate data refresh
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        if let id = authService.currentUser?.id {
+            await profileService.fetchUserProfile(userId: id)
+        }
         isLoading = false
     }
 }
