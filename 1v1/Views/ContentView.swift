@@ -1,0 +1,110 @@
+import SwiftUI
+
+struct ContentView: View {
+    @EnvironmentObject var authService: AuthService
+    @EnvironmentObject var navigationManager: NavigationManager
+    @EnvironmentObject var notificationService: NotificationService
+    
+    var body: some View {
+        Group {
+            if authService.isAuthenticated {
+                if authService.currentUser != nil {
+                    MainTabView()
+                        .sheet(isPresented: $navigationManager.showSharedProfile) {
+                            if let userId = navigationManager.sharedProfileUserId {
+                                SharedProfileView(userId: userId)
+                            }
+                        }
+                        .sheet(isPresented: $navigationManager.showDuelChallenge) {
+                            if let duelId = navigationManager.challengeDuelId {
+                                // TODO: Create DuelChallengeCard from duelId
+                                Text("Duel Challenge for: \(duelId)")
+                            }
+                        }
+                        .sheet(isPresented: $navigationManager.showScreenshotSubmission) {
+                            if let duelId = navigationManager.screenshotDuelId {
+                                ScreenshotCaptureView(
+                                    duelId: duelId,
+                                    gameType: "Call of Duty", // TODO: Get from duel data
+                                    gameMode: "Custom Match" // TODO: Get from duel data
+                                )
+                            }
+                        }
+                        .sheet(isPresented: $navigationManager.showDisputeReview) {
+                            if let duelId = navigationManager.disputeDuelId {
+                                // TODO: Implement DisputeReviewView
+                                Text("Dispute Review for Duel: \(duelId)")
+                            }
+                        }
+                        .sheet(isPresented: $navigationManager.showVictoryRecap) {
+                            if let victoryRecap = navigationManager.victoryRecapData {
+                                VictoryRecapView(victoryRecap: victoryRecap)
+                            }
+                        }
+                        .onAppear {
+                            setupNotificationHandling()
+                        }
+                } else {
+                    OnboardingFlowView()
+                }
+            } else {
+                AuthView()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            // Request notification authorization when app becomes active
+            Task {
+                await notificationService.requestAuthorization()
+            }
+        }
+    }
+    
+    private func setupNotificationHandling() {
+        // Set up notification action handling
+        UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
+        
+        // Request notification authorization
+        Task {
+            await notificationService.requestAuthorization()
+        }
+    }
+}
+
+// MARK: - Notification Delegate
+@MainActor
+class NotificationDelegate: NSObject, @preconcurrency UNUserNotificationCenterDelegate {
+    static let shared = NotificationDelegate()
+    
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let identifier = response.actionIdentifier
+        
+        // Handle notification actions
+        Task { @MainActor in
+            await NotificationService.shared.handleNotificationAction(
+                identifier: identifier,
+                notification: response.notification,
+                completionHandler: completionHandler
+            )
+        }
+    }
+    
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        // Show notification even when app is in foreground
+        completionHandler([.banner, .sound, .badge])
+    }
+}
+
+struct ContentView_Previews: PreviewProvider {
+    static var previews: some View {
+        ContentView()
+            .environmentObject(AuthService.shared)
+    }
+}
