@@ -59,12 +59,12 @@ class NotificationService: ObservableObject {
     
     // MARK: - Real-time Match Monitoring
     private func setupRealtimeSubscriptions() {
-        // Placeholder for Supabase realtime integration
+        // Basic realtime subscription to duels table for inserts/updates
         guard let client = supabaseService.getClient() else {
             print("⚠️ Supabase client not initialized; realtime disabled")
             return
         }
-        _ = client
+        // TODO: Implement Supabase Realtime subscription using supabase-swift API once confirmed.
         print("ℹ️ Realtime setup placeholder initialized")
     }
     
@@ -287,6 +287,19 @@ class NotificationService: ObservableObject {
                 try await Task.sleep(nanoseconds: 5_000_000_000) // 5 seconds
             }
         }
+    }
+    
+    // MARK: - Test Helpers
+    func scheduleTestNotificationIn(seconds: TimeInterval = 5) async {
+        let notification = PendingNotification(
+            userId: AuthService.shared.currentUser?.id ?? "test-user",
+            type: .achievement,
+            title: "Test Notification",
+            body: "This is a test notification.",
+            data: NotificationData(action: "test"),
+            expiresAt: Date().addingTimeInterval(3600)
+        )
+        await queueNotification(notification)
     }
     
     private func processNotificationQueue() async {

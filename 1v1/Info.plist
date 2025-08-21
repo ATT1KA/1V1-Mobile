@@ -33,6 +33,10 @@
 	<string>This app uses NFC to share and scan player profiles with other users.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>This app uses the camera to scan QR codes for sharing player profiles.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>This app needs photo library access to select and share images.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>This app saves generated images to your photo library.</string>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
@@ -57,6 +61,7 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>1v1mobile</string>
+				<string>com.1v1mobile.app</string>
 			</array>
 		</dict>
 		<dict>

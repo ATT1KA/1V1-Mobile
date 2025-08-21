@@ -44,6 +44,15 @@ struct ContentView: View {
                         .onAppear {
                             setupNotificationHandling()
                         }
+                        .toolbar {
+                            ToolbarItem(placement: .navigationBarTrailing) {
+                                Button("Notify") {
+                                    Task { @MainActor in
+                                        await notificationService.scheduleTestNotificationIn(seconds: 5)
+                                    }
+                                }
+                            }
+                        }
                 } else {
                     OnboardingFlowView()
                 }
