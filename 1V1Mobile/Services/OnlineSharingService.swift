@@ -1,6 +1,5 @@
 import Foundation
 import UIKit
-import Social
 import MessageUI
 import CoreImage
 import CoreImage.CIFilterBuiltins
@@ -12,14 +11,26 @@ class OnlineSharingService: ObservableObject {
     private let supabaseService = SupabaseService.shared
     private let qrCodeService = QRCodeService()
     
+    // Memory management
+    private var activePresentations: Set<UUID> = []
+    private var presentationTasks: [UUID: Task<Void, Never>] = [:]
+    
     private init() {}
     
-    // MARK: - Sharing Platform Enum
+    deinit {
+        // Cleanup all active presentations
+        presentationTasks.values.forEach { $0.cancel() }
+        presentationTasks.removeAll()
+    }
     
-    enum SharingPlatform: String, CaseIterable {
+    // MARK: - Modern Sharing Platform Enum
+    
+    enum ModernSharingPlatform: String, CaseIterable {
         case twitter = "Twitter"
         case discord = "Discord"
         case imessage = "iMessage"
+        case whatsapp = "WhatsApp"
+        case telegram = "Telegram"
         case general = "General"
         
         var displayName: String {
@@ -27,6 +38,8 @@ class OnlineSharingService: ObservableObject {
             case .twitter: return "X/Twitter"
             case .discord: return "Discord"
             case .imessage: return "iMessage"
+            case .whatsapp: return "WhatsApp"
+            case .telegram: return "Telegram"
             case .general: return "More..."
             }
         }
@@ -36,6 +49,8 @@ class OnlineSharingService: ObservableObject {
             case .twitter: return "bird.fill"
             case .discord: return "message.circle.fill"
             case .imessage: return "message.fill"
+            case .whatsapp: return "message.circle.fill"
+            case .telegram: return "paperplane.fill"
             case .general: return "square.and.arrow.up"
             }
         }
@@ -45,38 +60,111 @@ class OnlineSharingService: ObservableObject {
             case .twitter: return UIColor(red: 0.11, green: 0.63, blue: 0.95, alpha: 1.0)
             case .discord: return UIColor(red: 0.40, green: 0.40, blue: 0.67, alpha: 1.0)
             case .imessage: return UIColor(red: 0.00, green: 0.48, blue: 1.00, alpha: 1.0)
+            case .whatsapp: return UIColor(red: 0.13, green: 0.80, blue: 0.40, alpha: 1.0)
+            case .telegram: return UIColor(red: 0.00, green: 0.48, blue: 0.80, alpha: 1.0)
             case .general: return UIColor.systemBlue
+            }
+        }
+        
+        var activityTypes: [UIActivity.ActivityType] {
+            switch self {
+            case .twitter:
+                return [.postToTwitter]
+            case .discord:
+                return [] // Discord uses general sharing
+            case .imessage:
+                return [.message]
+            case .whatsapp:
+                return [] // WhatsApp appears in general
+            case .telegram:
+                return [] // Telegram appears in general
+            case .general:
+                return []
+            }
+        }
+        
+        var excludedTypes: [UIActivity.ActivityType] {
+            switch self {
+            case .twitter:
+                return [.postToFacebook, .postToWeibo, .postToVimeo, .postToTencentWeibo, .postToFlickr, .assignToContact, .addToReadingList, .openInIBooks, .markupAsPDF]
+            case .discord:
+                return [.postToFacebook, .postToTwitter, .postToWeibo, .postToVimeo, .postToTencentWeibo, .postToFlickr, .assignToContact, .addToReadingList, .openInIBooks, .markupAsPDF]
+            case .imessage:
+                return [.postToFacebook, .postToTwitter, .postToWeibo, .postToVimeo, .postToTencentWeibo, .postToFlickr, .assignToContact, .addToReadingList, .openInIBooks, .markupAsPDF]
+            default:
+                return []
             }
         }
     }
     
-    // MARK: - Share Content Generation
+    // MARK: - Modern Share Content Generation
     
-    func generateShareContent(for profile: UserProfile, platform: SharingPlatform) async -> ShareContent {
+    func generateModernShareContent(for profile: UserProfile, platform: ModernSharingPlatform) async -> ShareContent {
         let qrCodeImage = await generateQRCodeForProfile(profile)
         let challengeText = generateChallengeText()
         let profileUrl = generateProfileUrl(for: profile)
         
-        let baseText = """
+        let baseText = createBaseShareText(profile: profile, challenge: challengeText, url: profileUrl)
+        let platformText = optimizeTextForPlatform(baseText, platform: platform, profile: profile)
+        
+        return ShareContent(
+            text: platformText,
+            qrCodeImage: qrCodeImage,
+            profileUrl: profileUrl,
+            platform: platform
+        )
+    }
+    
+    private func createBaseShareText(profile: UserProfile, challenge: String, url: String) -> String {
+        return """
         🏆 Check out my 1V1 Mobile profile!
         
         👤 \(profile.username ?? "Player")
         🎮 Level \(profile.stats?.level ?? 0)
         🏅 \(profile.achievements?.count ?? 0) Achievements
         
-        \(challengeText)
+        \(challenge)
         
-        📱 Download 1V1 Mobile: \(profileUrl)
+        📱 Download 1V1 Mobile: \(url)
         """
-        
-        let platformSpecificText = customizeTextForPlatform(baseText, platform: platform, profile: profile)
-        
-        return ShareContent(
-            text: platformSpecificText,
-            qrCodeImage: qrCodeImage,
-            profileUrl: profileUrl,
-            platform: platform
-        )
+    }
+    
+    private func optimizeTextForPlatform(_ text: String, platform: ModernSharingPlatform, profile: UserProfile) -> String {
+        switch platform {
+        case .twitter:
+            // Twitter character limit optimization
+            let maxLength = 280
+            return text.count <= maxLength ? text : String(text.prefix(maxLength - 3)) + "..."
+            
+        case .discord:
+            // Discord markdown support
+            return """
+            **🏆 1V1 Mobile Profile Share**
+            
+            **👤 Player:** \(profile.username ?? "Unknown")
+            **🎮 Level:** \(profile.stats?.level ?? 0)
+            **🏅 Achievements:** \(profile.achievements?.count ?? 0)
+            
+            **\(generateChallengeText())**
+            
+            📱 **Download:** \(generateProfileUrl(for: profile))
+            """
+            
+        case .imessage:
+            // iMessage rich text support
+            return text
+            
+        case .whatsapp:
+            // WhatsApp optimized text
+            return text
+            
+        case .telegram:
+            // Telegram optimized text
+            return text
+            
+        case .general:
+            return text
+        }
     }
     
     private func generateQRCodeForProfile(_ profile: UserProfile) async -> UIImage? {
@@ -115,119 +203,50 @@ class OnlineSharingService: ObservableObject {
         return "1v1mobile://profile/\(profile.userId)"
     }
     
-    private func customizeTextForPlatform(_ baseText: String, platform: SharingPlatform, profile: UserProfile) -> String {
-        switch platform {
-        case .twitter:
-            // Twitter has character limits, so we need to be concise
-            let shortText = """
-            🏆 Check out my 1V1 Mobile profile!
-            👤 \(profile.username ?? "Player")
-            🎮 Level \(profile.stats?.level ?? 0)
-            \(generateChallengeText())
-            📱 \(generateProfileUrl(for: profile))
-            """
-            return shortText.count <= 280 ? shortText : String(shortText.prefix(277)) + "..."
-            
-        case .discord:
-            // Discord supports longer messages and markdown
-            return """
-            **🏆 1V1 Mobile Profile Share**
-            
-            **👤 Player:** \(profile.username ?? "Unknown")
-            **🎮 Level:** \(profile.stats?.level ?? 0)
-            **🏅 Achievements:** \(profile.achievements?.count ?? 0)
-            
-            **\(generateChallengeText())**
-            
-            📱 **Download:** \(generateProfileUrl(for: profile))
-            """
-            
-        case .imessage:
-            // iMessage supports rich text and images
-            return baseText
-            
-        case .general:
-            return baseText
-        }
-    }
-    
-    // MARK: - Platform-Specific Sharing
+    // MARK: - Modern Platform-Specific Sharing
     
     func shareToTwitter(profile: UserProfile) async -> Bool {
-        guard let shareContent = await generateShareContent(for: profile, platform: .twitter) else {
-            return false
-        }
-        
-        return await shareToSocialPlatform(
-            text: shareContent.text,
-            image: shareContent.qrCodeImage,
-            platform: .twitter
-        )
+        return await shareToPlatform(profile: profile, platform: .twitter)
     }
     
     func shareToDiscord(profile: UserProfile) async -> Bool {
-        guard let shareContent = await generateShareContent(for: profile, platform: .discord) else {
-            return false
-        }
-        
-        // Discord doesn't have a direct sharing API, so we'll use general sharing
-        return await shareToGeneralPlatform(
-            text: shareContent.text,
-            image: shareContent.qrCodeImage,
-            platform: .discord
-        )
+        return await shareToPlatform(profile: profile, platform: .discord)
     }
     
     func shareToIMessage(profile: UserProfile) async -> Bool {
-        guard let shareContent = await generateShareContent(for: profile, platform: .imessage) else {
-            return false
-        }
-        
-        return await shareToMessageUI(
-            text: shareContent.text,
-            image: shareContent.qrCodeImage
-        )
+        return await shareToPlatform(profile: profile, platform: .imessage)
+    }
+    
+    func shareToWhatsApp(profile: UserProfile) async -> Bool {
+        return await shareToPlatform(profile: profile, platform: .whatsapp)
+    }
+    
+    func shareToTelegram(profile: UserProfile) async -> Bool {
+        return await shareToPlatform(profile: profile, platform: .telegram)
     }
     
     func shareToGeneral(profile: UserProfile) async -> Bool {
-        guard let shareContent = await generateShareContent(for: profile, platform: .general) else {
-            return false
-        }
-        
-        return await shareToGeneralPlatform(
-            text: shareContent.text,
-            image: shareContent.qrCodeImage,
-            platform: .general
-        )
+        return await shareToPlatform(profile: profile, platform: .general)
     }
     
-    // MARK: - Platform Implementation
+    // MARK: - Unified Platform Sharing
     
-    private func shareToSocialPlatform(text: String, image: UIImage?, platform: SharingPlatform) async -> Bool {
-        guard let serviceType = getSocialServiceType(for: platform) else {
+    private func shareToPlatform(profile: UserProfile, platform: ModernSharingPlatform) async -> Bool {
+        guard let shareContent = await generateModernShareContent(for: profile, platform: platform) else {
             return false
         }
         
-        guard SLComposeViewController.isAvailable(forServiceType: serviceType) else {
-            print("⚠️ \(platform.displayName) sharing not available")
-            return false
+        switch platform {
+        case .imessage:
+            return await shareToMessageUI(text: shareContent.text, image: shareContent.qrCodeImage)
+        default:
+            return await shareToActivityViewController(text: shareContent.text, image: shareContent.qrCodeImage, platform: platform)
         }
-        
-        guard let composeVC = SLComposeViewController(forServiceType: serviceType) else {
-            return false
-        }
-        
-        composeVC.setInitialText(text)
-        
-        if let image = image {
-            composeVC.add(image)
-        }
-        
-        // Present the compose view controller
-        return await presentComposeViewController(composeVC)
     }
     
-    private func shareToGeneralPlatform(text: String, image: UIImage?, platform: SharingPlatform) async -> Bool {
+    // MARK: - Modern Platform Implementation
+    
+    private func shareToActivityViewController(text: String, image: UIImage?, platform: ModernSharingPlatform) async -> Bool {
         var activityItems: [Any] = [text]
         
         if let image = image {
@@ -239,17 +258,8 @@ class OnlineSharingService: ObservableObject {
             applicationActivities: nil
         )
         
-        // Exclude some activities for specific platforms
-        if platform == .discord {
-            activityVC.excludedActivityTypes = [
-                .postToFacebook,
-                .postToTwitter,
-                .postToWeibo,
-                .postToVimeo,
-                .postToTencentWeibo,
-                .postToFlickr
-            ]
-        }
+        // Set platform-specific exclusions
+        activityVC.excludedActivityTypes = platform.excludedTypes
         
         return await presentActivityViewController(activityVC)
     }
@@ -272,65 +282,77 @@ class OnlineSharingService: ObservableObject {
         return await presentMessageViewController(messageVC)
     }
     
-    // MARK: - Helper Methods
-    
-    private func getSocialServiceType(for platform: SharingPlatform) -> String? {
-        switch platform {
-        case .twitter: return SLServiceTypeTwitter
-        case .discord: return nil // Discord doesn't have a social service type
-        case .imessage: return nil // iMessage uses MessageUI
-        case .general: return nil // General uses UIActivityViewController
-        }
-    }
-    
-    private func presentComposeViewController(_ composeVC: SLComposeViewController) async -> Bool {
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.main.async {
-                if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                   let window = windowScene.windows.first {
-                    window.rootViewController?.present(composeVC, animated: true) {
-                        continuation.resume(returning: true)
-                    }
-                } else {
-                    continuation.resume(returning: false)
-                }
-            }
-        }
-    }
+    // MARK: - Enhanced Presentation Methods with Memory Management
     
     private func presentActivityViewController(_ activityVC: UIActivityViewController) async -> Bool {
+        let presentationId = UUID()
+        
         return await withCheckedContinuation { continuation in
-            DispatchQueue.main.async {
-                if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                   let window = windowScene.windows.first {
-                    window.rootViewController?.present(activityVC, animated: true) {
-                        continuation.resume(returning: true)
-                    }
-                } else {
-                    continuation.resume(returning: false)
+            let task = Task {
+                await presentViewController(activityVC, presentationId: presentationId) { success in
+                    continuation.resume(returning: success)
                 }
             }
+            
+            presentationTasks[presentationId] = task
         }
     }
     
     private func presentMessageViewController(_ messageVC: MFMessageComposeViewController) async -> Bool {
+        let presentationId = UUID()
+        
         return await withCheckedContinuation { continuation in
-            DispatchQueue.main.async {
-                if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                   let window = windowScene.windows.first {
-                    window.rootViewController?.present(messageVC, animated: true) {
-                        continuation.resume(returning: true)
-                    }
-                } else {
-                    continuation.resume(returning: false)
+            let task = Task {
+                await presentViewController(messageVC, presentationId: presentationId) { success in
+                    continuation.resume(returning: success)
                 }
             }
+            
+            presentationTasks[presentationId] = task
+        }
+    }
+    
+    private func presentViewController<T: UIViewController>(
+        _ viewController: T,
+        presentationId: UUID,
+        completion: @escaping (Bool) -> Void
+    ) async {
+        await MainActor.run {
+            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                  let window = windowScene.windows.first,
+                  let rootViewController = window.rootViewController else {
+                completion(false)
+                return
+            }
+            
+            activePresentations.insert(presentationId)
+            
+            // Set up dismissal handling
+            if let messageVC = viewController as? MFMessageComposeViewController {
+                messageVC.messageComposeDelegate = MessageComposeDelegate.shared
+                // Handle dismissal in delegate
+            } else {
+                // Handle UIActivityViewController dismissal
+                viewController.presentationController?.delegate = PresentationDelegate(
+                    presentationId: presentationId,
+                    onDismiss: {
+                        Task { @MainActor in
+                            self.activePresentations.remove(presentationId)
+                            self.presentationTasks[presentationId]?.cancel()
+                            self.presentationTasks.removeValue(forKey: presentationId)
+                            completion(true)
+                        }
+                    }
+                )
+            }
+            
+            rootViewController.present(viewController, animated: true)
         }
     }
     
     // MARK: - Analytics
     
-    func logShareEvent(profile: UserProfile, platform: SharingPlatform) async {
+    func logShareEvent(profile: UserProfile, platform: ModernSharingPlatform) async {
         let shareEvent = ProfileShareEvent(
             userId: profile.userId,
             sharedUserId: profile.userId,
@@ -354,7 +376,7 @@ struct ShareContent {
     let text: String
     let qrCodeImage: UIImage?
     let profileUrl: String
-    let platform: OnlineSharingService.SharingPlatform
+    let platform: OnlineSharingService.ModernSharingPlatform
 }
 
 struct ProfileShareData: Codable {
@@ -381,7 +403,7 @@ struct ProfileShareEvent: Codable {
     }
 }
 
-// MARK: - Message Compose Delegate
+// MARK: - Enhanced Message Compose Delegate
 
 class MessageComposeDelegate: NSObject, MFMessageComposeViewControllerDelegate {
     static let shared = MessageComposeDelegate()
@@ -391,7 +413,9 @@ class MessageComposeDelegate: NSObject, MFMessageComposeViewControllerDelegate {
     }
     
     func messageComposeViewController(_ controller: MFMessageComposeViewController, didFinishWith result: MessageComposeResult) {
-        controller.dismiss(animated: true)
+        controller.dismiss(animated: true) {
+            // Cleanup handled by presentation method
+        }
         
         switch result {
         case .cancelled:
@@ -403,5 +427,22 @@ class MessageComposeDelegate: NSObject, MFMessageComposeViewControllerDelegate {
         @unknown default:
             print("❓ Unknown iMessage result")
         }
+    }
+}
+
+// MARK: - Presentation Delegate for UIActivityViewController
+
+class PresentationDelegate: NSObject, UIAdaptivePresentationControllerDelegate {
+    private let presentationId: UUID
+    private let onDismiss: () -> Void
+    
+    init(presentationId: UUID, onDismiss: @escaping () -> Void) {
+        self.presentationId = presentationId
+        self.onDismiss = onDismiss
+        super.init()
+    }
+    
+    func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+        onDismiss()
     }
 }

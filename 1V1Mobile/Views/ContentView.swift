@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var authService: AuthService
+    @EnvironmentObject var navigationManager: NavigationManager
     
     var body: some View {
         Group {
@@ -17,6 +18,11 @@ struct ContentView: View {
         }
         .animation(.easeInOut, value: authService.isAuthenticated)
         .animation(.easeInOut, value: authService.showOnboarding)
+        .sheet(isPresented: $navigationManager.showSharedProfile) {
+            if let userId = navigationManager.sharedProfileUserId {
+                SharedProfileView(userId: userId)
+            }
+        }
     }
 }
 

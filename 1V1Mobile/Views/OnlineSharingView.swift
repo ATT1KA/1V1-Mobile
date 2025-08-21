@@ -7,7 +7,7 @@ struct OnlineSharingView: View {
     @Environment(\.dismiss) private var dismiss
     
     @State private var isLoading = false
-    @State private var selectedPlatform: OnlineSharingService.SharingPlatform?
+    @State private var selectedPlatform: OnlineSharingService.ModernSharingPlatform?
     @State private var showError = false
     @State private var errorMessage = ""
     @State private var shareContent: ShareContent?
@@ -179,7 +179,7 @@ struct OnlineSharingView: View {
                 .foregroundColor(.white)
             
             LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 2), spacing: 16) {
-                ForEach(OnlineSharingService.SharingPlatform.allCases, id: \.self) { platform in
+                ForEach(OnlineSharingService.ModernSharingPlatform.allCases, id: \.self) { platform in
                     SharingPlatformButton(
                         platform: platform,
                         isLoading: isLoading && selectedPlatform == platform,
@@ -196,10 +196,10 @@ struct OnlineSharingView: View {
     // MARK: - Helper Methods
     
     private func loadShareContent() async {
-        shareContent = await sharingService.generateShareContent(for: profile, platform: .general)
+        shareContent = await sharingService.generateModernShareContent(for: profile, platform: .general)
     }
     
-    private func shareToPlatform(_ platform: OnlineSharingService.SharingPlatform) async {
+    private func shareToPlatform(_ platform: OnlineSharingService.ModernSharingPlatform) async {
         isLoading = true
         selectedPlatform = platform
         
@@ -213,6 +213,10 @@ struct OnlineSharingView: View {
                 success = await sharingService.shareToDiscord(profile: profile)
             case .imessage:
                 success = await sharingService.shareToIMessage(profile: profile)
+            case .whatsapp:
+                success = await sharingService.shareToWhatsApp(profile: profile)
+            case .telegram:
+                success = await sharingService.shareToTelegram(profile: profile)
             case .general:
                 success = await sharingService.shareToGeneral(profile: profile)
             }
@@ -259,7 +263,7 @@ struct StatPreviewItem: View {
 }
 
 struct SharingPlatformButton: View {
-    let platform: OnlineSharingService.SharingPlatform
+    let platform: OnlineSharingService.ModernSharingPlatform
     let isLoading: Bool
     let action: () async -> Void
     

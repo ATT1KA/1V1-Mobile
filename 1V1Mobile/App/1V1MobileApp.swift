@@ -5,11 +5,13 @@ import GoogleSignIn
 @main
 struct OneVOneMobileApp: App {
     @StateObject private var authService = AuthService()
+    @StateObject private var navigationManager = NavigationManager()
     
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(authService)
+                .environmentObject(navigationManager)
                 .onAppear {
                     setupSupabase()
                     setupGoogleSignIn()
@@ -55,9 +57,8 @@ struct OneVOneMobileApp: App {
             let userId = pathComponents[1]
             print("📱 Opening profile for user: \(userId)")
             
-            // TODO: Navigate to profile view
-            // This would typically involve setting up a navigation state
-            // to show the profile of the shared user
+            // Navigate to shared profile view
+            navigationManager.navigateToSharedProfile(userId: userId)
         }
     }
 }

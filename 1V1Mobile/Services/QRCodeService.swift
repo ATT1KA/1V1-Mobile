@@ -16,6 +16,8 @@ class QRCodeService: ObservableObject {
     
     // MARK: - Performance Optimization
     private var qrCodeCache: [String: UIImage] = [:]
+    private let cacheQueue = DispatchQueue(label: "qrCodeCache", qos: .userInitiated)
+    private let maxCacheSize = 50
     
     // MARK: - Enhanced QR Code Validation
     private func validateQRCodeData(_ data: String) -> Bool {
@@ -46,7 +48,7 @@ class QRCodeService: ObservableObject {
         let profileKey = "\(profile.userId)_\(profile.updatedAt.timeIntervalSince1970)"
         
         // Check cache first
-        if let cachedImage = qrCodeCache[profileKey] {
+        if let cachedImage = getCachedQRCode(for: profileKey) {
             generatedQRImage = cachedImage
             errorMessage = nil
             return
@@ -85,11 +87,46 @@ class QRCodeService: ObservableObject {
             errorMessage = nil
             
             // Cache the generated QR code
-            qrCodeCache[profileKey] = generatedQRImage
+            if let image = generatedQRImage {
+                cacheQRCode(image, for: profileKey)
+            }
             
         } catch {
             errorMessage = "Error generating QR code: \(error.localizedDescription)"
         }
+    }
+    
+    // MARK: - Cache Management
+    
+    private func getCachedQRCode(for key: String) -> UIImage? {
+        return cacheQueue.sync {
+            return qrCodeCache[key]
+        }
+    }
+    
+    private func cacheQRCode(_ image: UIImage, for key: String) {
+        cacheQueue.async {
+            // Implement LRU cache
+            if self.qrCodeCache.count >= self.maxCacheSize {
+                // Remove oldest entry (simple implementation)
+                let firstKey = self.qrCodeCache.keys.first
+                if let keyToRemove = firstKey {
+                    self.qrCodeCache.removeValue(forKey: keyToRemove)
+                }
+            }
+            
+            self.qrCodeCache[key] = image
+        }
+    }
+    
+    func clearCache() {
+        cacheQueue.async {
+            self.qrCodeCache.removeAll()
+        }
+    }
+    
+    deinit {
+        clearCache()
     }
     
     func generateQRCodeURL(for profile: UserProfile) {
