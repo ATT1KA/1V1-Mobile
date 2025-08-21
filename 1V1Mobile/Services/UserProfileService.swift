@@ -12,7 +12,26 @@ class UserProfileService: ObservableObject {
     private let supabaseService = SupabaseService.shared
     
     func fetchUserProfile(userId: String) async {
-        await loadUserProfile(userId: userId)
+        do {
+            _ = try await loadUserProfile(userId: userId)
+        } catch {
+            print("Error fetching user profile: \(error)")
+        }
+    }
+    
+    func loadAllUsers() async throws -> [User] {
+        guard let client = supabaseService.getClient() else {
+            throw NSError(domain: "UserProfileService", code: 1, userInfo: [NSLocalizedDescriptionKey: "Supabase client not initialized"])
+        }
+        
+        let users: [User] = try await client.database
+            .from("profiles")
+            .select()
+            .order("username", ascending: true)
+            .execute()
+            .value
+        
+        return users
     }
     
     func loadUserProfile(userId: String) async throws -> UserProfile {

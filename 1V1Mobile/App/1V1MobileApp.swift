@@ -43,15 +43,24 @@ struct OneVOneMobileApp: App {
         // Handle Google Sign-In URL callback
         GIDSignIn.sharedInstance.handle(url)
         
-        // Handle custom URL schemes for profile sharing
+        // Handle custom URL schemes
         if url.scheme == "1v1mobile" {
+            handleCustomURL(url)
+        }
+    }
+    
+    private func handleCustomURL(_ url: URL) {
+        switch url.host {
+        case "profile":
             handleProfileURL(url)
+        case "duel":
+            handleDuelURL(url)
+        default:
+            print("Unknown URL host: \(url.host ?? "nil")")
         }
     }
     
     private func handleProfileURL(_ url: URL) {
-        guard url.host == "profile" else { return }
-        
         let pathComponents = url.pathComponents
         if pathComponents.count >= 2 {
             let userId = pathComponents[1]
@@ -59,6 +68,17 @@ struct OneVOneMobileApp: App {
             
             // Navigate to shared profile view
             navigationManager.navigateToSharedProfile(userId: userId)
+        }
+    }
+    
+    private func handleDuelURL(_ url: URL) {
+        let pathComponents = url.pathComponents
+        if pathComponents.count >= 2 {
+            let duelId = pathComponents[1]
+            print("⚔️ Opening duel challenge: \(duelId)")
+            
+            // Navigate to duel challenge view
+            navigationManager.navigateToDuelChallenge(duelId: duelId)
         }
     }
 }

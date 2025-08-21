@@ -1,84 +1,87 @@
 import Foundation
-import Supabase
 import UIKit
+import Supabase
 
 class StorageService: ObservableObject {
+    static let shared = StorageService()
+    
     private let supabaseService = SupabaseService.shared
     
+    private init() {}
+    
     // MARK: - Image Upload
-    
-    func uploadImage(image: UIImage, bucket: String, path: String) async throws -> String {
-        guard let imageData = image.jpegData(compressionQuality: 0.8) else {
-            throw StorageError.invalidImageData
-        }
+    func uploadImage(
+        image: UIImage,
+        bucket: String,
+        path: String,
+        compressionQuality: CGFloat = 0.8
+    ) async throws -> String {
         
-        return try await supabaseService.uploadFile(
-            bucket: bucket,
-            path: path,
-            data: imageData
-        )
-    }
-    
-    func uploadImageFromData(imageData: Data, bucket: String, path: String) async throws -> String {
-        return try await supabaseService.uploadFile(
-            bucket: bucket,
-            path: path,
-            data: imageData
-        )
-    }
-    
-    // MARK: - File Upload
-    
-    func uploadFile(fileURL: URL, bucket: String, path: String) async throws -> String {
-        let fileData = try Data(contentsOf: fileURL)
-        return try await supabaseService.uploadFile(
-            bucket: bucket,
-            path: path,
-            data: fileData
-        )
-    }
-    
-    func uploadFileData(fileData: Data, bucket: String, path: String, contentType: String = "application/octet-stream") async throws -> String {
         guard let client = supabaseService.getClient() else {
             throw StorageError.clientNotInitialized
         }
         
-        let response = try await client.storage
-            .from(bucket)
-            .upload(
-                path: path,
-                file: fileData,
-                options: FileOptions(contentType: contentType)
-            )
+        // Compress image
+        guard let imageData = image.jpegData(compressionQuality: compressionQuality) else {
+            throw StorageError.imageCompressionFailed
+        }
         
-        return response
+        // Validate file size (max 10MB)
+        guard imageData.count <= 10 * 1024 * 1024 else {
+            throw StorageError.fileTooLarge
+        }
+        
+        do {
+            // Upload to Supabase Storage
+            try await client.storage
+                .from(bucket)
+                .upload(path: path, file: imageData)
+            
+            // Get public URL
+            let publicURL = try client.storage
+                .from(bucket)
+                .getPublicURL(path: path)
+            
+            return publicURL.absoluteString
+            
+        } catch {
+            throw StorageError.uploadFailed(error.localizedDescription)
+        }
     }
     
-    // MARK: - File Download
-    
-    func downloadImage(bucket: String, path: String) async throws -> UIImage {
-        let imageData = try await supabaseService.downloadFile(bucket: bucket, path: path)
+    // MARK: - Image Download
+    func downloadImage(from url: String) async throws -> UIImage {
+        guard let imageURL = URL(string: url) else {
+            throw StorageError.invalidURL
+        }
         
-        guard let image = UIImage(data: imageData) else {
+        let (data, response) = try await URLSession.shared.data(from: imageURL)
+        
+        guard let httpResponse = response as? HTTPURLResponse,
+              httpResponse.statusCode == 200 else {
+            throw StorageError.downloadFailed
+        }
+        
+        guard let image = UIImage(data: data) else {
             throw StorageError.invalidImageData
         }
         
         return image
     }
     
-    func downloadFile(bucket: String, path: String) async throws -> Data {
-        return try await supabaseService.downloadFile(bucket: bucket, path: path)
-    }
-    
-    func downloadFileToURL(bucket: String, path: String, destinationURL: URL) async throws {
-        let fileData = try await supabaseService.downloadFile(bucket: bucket, path: path)
-        try fileData.write(to: destinationURL)
-    }
-    
     // MARK: - File Management
-    
     func deleteFile(bucket: String, path: String) async throws {
-        try await supabaseService.deleteFile(bucket: bucket, path: path)
+        guard let client = supabaseService.getClient() else {
+            throw StorageError.clientNotInitialized
+        }
+        
+        do {
+            try await client.storage
+                .from(bucket)
+                .remove(paths: [path])
+        } catch {
+            throw StorageError.deleteFailed(error.localizedDescription)
+        }
     }
     
     func listFiles(bucket: String, path: String? = nil) async throws -> [FileObject] {
@@ -86,117 +89,81 @@ class StorageService: ObservableObject {
             throw StorageError.clientNotInitialized
         }
         
-        let response = try await client.storage
-            .from(bucket)
-            .list(path: path ?? "")
-        
-        return response
-    }
-    
-    func getPublicURL(bucket: String, path: String) -> URL? {
-        guard let client = supabaseService.getClient() else {
-            return nil
+        do {
+            let files = try await client.storage
+                .from(bucket)
+                .list(path: path)
+            
+            return files
+        } catch {
+            throw StorageError.listFailed(error.localizedDescription)
         }
-        
-        return client.storage
-            .from(bucket)
-            .getPublicURL(path: path)
     }
     
     // MARK: - Bucket Management
-    
-    func createBucket(name: String, isPublic: Bool = false) async throws {
+    func createBucket(_ bucketName: String, isPublic: Bool = false) async throws {
         guard let client = supabaseService.getClient() else {
             throw StorageError.clientNotInitialized
         }
         
-        try await client.storage.createBucket(
-            name: name,
-            options: BucketOptions(public: isPublic)
-        )
-    }
-    
-    func deleteBucket(name: String) async throws {
-        guard let client = supabaseService.getClient() else {
-            throw StorageError.clientNotInitialized
-        }
-        
-        try await client.storage.deleteBucket(name: name)
-    }
-    
-    func listBuckets() async throws -> [Bucket] {
-        guard let client = supabaseService.getClient() else {
-            throw StorageError.clientNotInitialized
-        }
-        
-        return try await client.storage.listBuckets()
-    }
-    
-    // MARK: - Utility Methods
-    
-    func generateUniqueFileName(originalName: String) -> String {
-        let timestamp = Int(Date().timeIntervalSince1970)
-        let uuid = UUID().uuidString
-        let fileExtension = (originalName as NSString).pathExtension
-        
-        if fileExtension.isEmpty {
-            return "\(timestamp)_\(uuid)"
-        } else {
-            return "\(timestamp)_\(uuid).\(fileExtension)"
-        }
-    }
-    
-    func getFileSize(fileURL: URL) -> Int64 {
         do {
-            let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
-            return attributes[.size] as? Int64 ?? 0
+            try await client.storage.createBucket(bucketName, options: BucketOptions(public: isPublic))
         } catch {
-            return 0
+            throw StorageError.bucketCreationFailed(error.localizedDescription)
         }
     }
     
-    func isValidFileType(fileURL: URL, allowedTypes: [String]) -> Bool {
-        let fileExtension = fileURL.pathExtension.lowercased()
-        return allowedTypes.contains(fileExtension)
-    }
-    
-    func isValidFileSize(fileURL: URL, maxSizeInMB: Int) -> Bool {
-        let fileSize = getFileSize(fileURL: fileURL)
-        let maxSizeInBytes = Int64(maxSizeInMB * 1024 * 1024)
-        return fileSize <= maxSizeInBytes
+    func getBuckets() async throws -> [Bucket] {
+        guard let client = supabaseService.getClient() else {
+            throw StorageError.clientNotInitialized
+        }
+        
+        do {
+            return try await client.storage.listBuckets()
+        } catch {
+            throw StorageError.bucketListFailed(error.localizedDescription)
+        }
     }
 }
 
-// MARK: - Custom Errors
-
+// MARK: - Storage Errors
 enum StorageError: Error, LocalizedError {
     case clientNotInitialized
-    case invalidImageData
-    case fileNotFound
-    case uploadFailed
-    case downloadFailed
-    case invalidFileType
+    case imageCompressionFailed
     case fileTooLarge
-    case bucketNotFound
+    case uploadFailed(String)
+    case downloadFailed
+    case invalidURL
+    case invalidImageData
+    case deleteFailed(String)
+    case listFailed(String)
+    case bucketCreationFailed(String)
+    case bucketListFailed(String)
     
     var errorDescription: String? {
         switch self {
         case .clientNotInitialized:
-            return "Storage client is not initialized"
+            return "Storage client not initialized"
+        case .imageCompressionFailed:
+            return "Failed to compress image"
+        case .fileTooLarge:
+            return "File size exceeds 10MB limit"
+        case .uploadFailed(let message):
+            return "Upload failed: \(message)"
+        case .downloadFailed:
+            return "Download failed"
+        case .invalidURL:
+            return "Invalid URL provided"
         case .invalidImageData:
             return "Invalid image data"
-        case .fileNotFound:
-            return "File not found"
-        case .uploadFailed:
-            return "File upload failed"
-        case .downloadFailed:
-            return "File download failed"
-        case .invalidFileType:
-            return "Invalid file type"
-        case .fileTooLarge:
-            return "File size exceeds limit"
-        case .bucketNotFound:
-            return "Storage bucket not found"
+        case .deleteFailed(let message):
+            return "Delete failed: \(message)"
+        case .listFailed(let message):
+            return "List files failed: \(message)"
+        case .bucketCreationFailed(let message):
+            return "Bucket creation failed: \(message)"
+        case .bucketListFailed(let message):
+            return "Bucket list failed: \(message)"
         }
     }
 }
