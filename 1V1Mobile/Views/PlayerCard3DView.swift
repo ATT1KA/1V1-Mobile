@@ -19,6 +19,7 @@ struct PlayerCard3DView: View {
     @State private var scannedCode: String?
     @State private var showingErrorAlert = false
     @State private var errorMessage = ""
+    @State private var showingOnlineSharing = false
     
     // Services
     @StateObject private var nfcService = NFCService()
@@ -142,6 +143,14 @@ struct PlayerCard3DView: View {
         }
         .sheet(isPresented: $showingQRScanner) {
             QRCodeScannerView(scannedCode: $scannedCode, isScanning: $showingQRScanner)
+        }
+        .sheet(isPresented: $showingOnlineSharing) {
+            OnlineSharingView(profile: UserProfile(
+                from: user,
+                stats: profileService.userStats,
+                card: profileService.userCard,
+                achievements: profileService.achievements
+            ))
         }
         .onChange(of: pendingImage) { newImage in
             if let image = newImage {
@@ -330,6 +339,24 @@ private struct PlayerCardContent: View {
             
             // Sharing Buttons
             HStack(spacing: 16) {
+                // Online Share Button
+                Button(action: {
+                    showingOnlineSharing = true
+                }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.caption)
+                        Text("Share Online")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.purple.opacity(0.3))
+                    .cornerRadius(8)
+                }
+                
                 // NFC Share Button
                 Button(action: {
                     Task {

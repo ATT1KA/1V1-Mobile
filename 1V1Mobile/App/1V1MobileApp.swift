@@ -40,5 +40,24 @@ struct OneVOneMobileApp: App {
     private func handleURL(_ url: URL) {
         // Handle Google Sign-In URL callback
         GIDSignIn.sharedInstance.handle(url)
+        
+        // Handle custom URL schemes for profile sharing
+        if url.scheme == "1v1mobile" {
+            handleProfileURL(url)
+        }
+    }
+    
+    private func handleProfileURL(_ url: URL) {
+        guard url.host == "profile" else { return }
+        
+        let pathComponents = url.pathComponents
+        if pathComponents.count >= 2 {
+            let userId = pathComponents[1]
+            print("📱 Opening profile for user: \(userId)")
+            
+            // TODO: Navigate to profile view
+            // This would typically involve setting up a navigation state
+            // to show the profile of the shared user
+        }
     }
 }
