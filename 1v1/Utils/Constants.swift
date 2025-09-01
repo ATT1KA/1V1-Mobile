@@ -85,6 +85,12 @@ struct Constants {
         static let maxScore = 100
         static let minScore = 0
     }
+
+    // MARK: - Verification
+    struct VerificationWindow {
+        /// Number of seconds allowed to submit verification after a match ends
+        static let seconds: Int = 180
+    }
 }
 
 // MARK: - Events

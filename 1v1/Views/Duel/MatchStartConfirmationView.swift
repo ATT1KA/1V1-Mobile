@@ -27,47 +27,36 @@ struct MatchStartConfirmationView: View {
     }
 
     var body: some View {
-        NavigationView {
-            ZStack {
-                LinearGradient(
-                    colors: [Color(hex: "#1a1a2e"), Color(hex: "#16213e"), Color(hex: "#0f3460")],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                .ignoresSafeArea()
+        ConfirmationContainer {
+            VStack(spacing: 20) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(titleText)
+                        .font(.title2)
+                        .fontWeight(.bold)
+                        .foregroundColor(.white)
 
-                VStack(spacing: 20) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text(titleText)
-                            .font(.title2)
-                            .fontWeight(.bold)
-                            .foregroundColor(.white)
-
-                        Text(bodyMessage)
-                            .font(.body)
-                            .foregroundColor(.white.opacity(0.9))
-                            .multilineTextAlignment(.leading)
-                    }
-                    .padding(18)
-                    .background(Color.white.opacity(0.03))
-                    .cornerRadius(12)
-
-                    HStack(spacing: 12) {
-                        Button("Cancel") {
-                            dismiss()
-                        }
-                        .buttonStyle(SecondaryButtonStyle())
-
-                        Button("Start Match") {
-                            dismiss()
-                            onConfirm()
-                        }
-                        .buttonStyle(PrimaryButtonStyle())
-                    }
+                    Text(bodyMessage)
+                        .font(.body)
+                        .foregroundColor(.white.opacity(0.9))
+                        .multilineTextAlignment(.leading)
                 }
-                .padding(20)
+                .padding(18)
+                .background(Color.white.opacity(0.03))
+                .cornerRadius(12)
+
+                HStack(spacing: 12) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
+
+                    Button("Start Match") {
+                        dismiss()
+                        onConfirm()
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                }
             }
-            .navigationBarTitleDisplayMode(.inline)
         }
     }
 }

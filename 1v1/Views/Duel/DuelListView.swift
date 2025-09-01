@@ -753,6 +753,7 @@ struct DuelDetailsView: View {
     @State private var showError = false
     @State private var errorMessage = ""
     @State private var showStartMatchConfirmation = false
+    @State private var showEndMatchConfirmation = false
     @State private var isStarting = false
 
     init(duel: Duel) {
@@ -841,6 +842,21 @@ struct DuelDetailsView: View {
                     isStarting = true
                     await startMatch()
                     isStarting = false
+                }
+            }
+        }
+        .sheet(isPresented: $showEndMatchConfirmation) {
+            MatchEndConfirmationView(duel: currentDuel, opponentDisplayName: otherPlayerDisplayName) {
+                Task {
+                    await endMatch()
+
+                    // After attempting to end the match, present the screenshot capture
+                    // sheet if no error occurred. Use the main actor to update view state.
+                    await MainActor.run {
+                        if !showError {
+                            showScreenshotCapture = true
+                        }
+                    }
                 }
             }
         }
@@ -995,9 +1011,7 @@ struct DuelDetailsView: View {
                     .buttonStyle(PrimaryButtonStyle())
                 } else {
                     Button("End Match") {
-                        Task {
-                            await endMatch()
-                        }
+                        showEndMatchConfirmation = true
                     }
                     .buttonStyle(SecondaryButtonStyle())
                 }
