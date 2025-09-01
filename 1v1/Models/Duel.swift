@@ -51,6 +51,7 @@ enum DuelStatus: String, Codable, CaseIterable {
     case accepted = "accepted"
     case declined = "declined"
     case inProgress = "in_progress"
+    case ended = "ended"
     case completed = "completed"
     case cancelled = "cancelled"
     case expired = "expired"
@@ -62,6 +63,7 @@ enum DuelStatus: String, Codable, CaseIterable {
         case .accepted: return "Accepted"
         case .declined: return "Declined"
         case .inProgress: return "In Progress"
+        case .ended: return "Ended"
         case .completed: return "Completed"
         case .cancelled: return "Cancelled"
         case .expired: return "Expired"
@@ -75,6 +77,7 @@ enum DuelStatus: String, Codable, CaseIterable {
         case .accepted: return "#4CAF50" // Green
         case .declined: return "#F44336" // Red
         case .inProgress: return "#2196F3" // Blue
+        case .ended: return "#3F51B5" // Indigo
         case .completed: return "#9C27B0" // Purple
         case .cancelled: return "#757575" // Gray
         case .expired: return "#FF9800" // Orange

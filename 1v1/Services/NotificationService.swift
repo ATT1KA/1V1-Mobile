@@ -13,24 +13,49 @@ class NotificationService: ObservableObject {
     
     private let supabaseService = SupabaseService.shared
     private var cancellables = Set<AnyCancellable>()
-    private var realtimeSubscriptions: [String: Any] = [:]
+    private var realtimeSubscriptions: [String: RealtimeChannel] = [:]
     private var matchEndTimers: [String: Timer] = [:]
     private var matchMonitoringTasks: [String: Task<Void, Never>] = [:]
+    private var verificationReminderTasks: [String: Task<Void, Never>] = [:]
     private var notificationDeliveryQueue: [PendingNotification] = []
+    // Resubscribe/backoff state for realtime channels
+    private var realtimeResubscribeDelay: TimeInterval = 1.0
+    private let realtimeResubscribeMaxDelay: TimeInterval = 32.0
     
     private init() {
         checkAuthorizationStatus()
-        setupRealtimeSubscriptions()
+        // Wire realtime subscriptions to auth state changes
+        authCancellable = AuthService.shared.$currentUser.sink { [weak self] user in
+            Task { await self?.authStateChanged(user: user) }
+        }
         startNotificationDeliveryQueue()
     }
+
+    private var authCancellable: AnyCancellable?
     
     // deinit intentionally omitted; singleton lives app lifetime
     
     // MARK: - Resource Management
     private func cleanupResources() {
+        // Unsubscribe from any active realtime channels
+        for (key, channel) in realtimeSubscriptions {
+            print("ℹ️ Unsubscribing realtime channel: \(key)")
+            channel.unsubscribe()
+        }
         realtimeSubscriptions.removeAll()
         matchEndTimers.values.forEach { $0.invalidate() }
         matchMonitoringTasks.values.forEach { $0.cancel() }
+    }
+
+    private func authStateChanged(user: User?) async {
+        if user != nil {
+            // Ensure we start fresh
+            cleanupResources()
+            setupRealtimeSubscriptions()
+        } else {
+            // Unsubscribe/cleanup on sign-out
+            cleanupResources()
+        }
     }
     
     // MARK: - Authorization
@@ -69,13 +94,103 @@ class NotificationService: ObservableObject {
     
     // MARK: - Real-time Match Monitoring
     private func setupRealtimeSubscriptions() {
-        // Basic realtime subscription to duels table for inserts/updates
         guard let client = supabaseService.getClient() else {
             print("⚠️ Supabase client not initialized; realtime disabled")
             return
         }
-        // TODO: Implement Supabase Realtime subscription using supabase-swift API once confirmed.
-        print("ℹ️ Realtime setup placeholder initialized")
+
+        guard let currentUserId = AuthService.shared.currentUser?.id else {
+            print("⚠️ No signed-in user; skipping realtime duel subscription")
+            return
+        }
+
+        let channel = client.realtime.channel("realtime:public:duels")
+
+        // Register two filtered handlers (one per player column) using inline postgresChange closures.
+        // Filter for challenger changes
+        let challengerFilter = "challenger_id=eq.\(currentUserId)"
+        channel.postgresChange(event: .insert, schema: "public", table: "duels", filter: challengerFilter) { [weak self] payload in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                guard let raw = payload.record else { return }
+                guard let record = Self.coerceRecord(raw) else { return }
+
+                guard let challengerId = record["challenger_id"] as? String,
+                      let opponentId = record["opponent_id"] as? String,
+                      [challengerId, opponentId].contains(currentUserId) else { return }
+
+                await self.handleDuelInsert(["new": record])
+            }
+        }
+
+        channel.postgresChange(event: .update, schema: "public", table: "duels", filter: challengerFilter) { [weak self] payload in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                guard let raw = payload.record else { return }
+                guard let record = Self.coerceRecord(raw) else { return }
+
+                guard let challengerId = record["challenger_id"] as? String,
+                      let opponentId = record["opponent_id"] as? String,
+                      [challengerId, opponentId].contains(currentUserId) else { return }
+
+                await self.handleDuelUpdate(["new": record])
+            }
+        }
+
+        // Filter for opponent changes
+        let opponentFilter = "opponent_id=eq.\(currentUserId)"
+        channel.postgresChange(event: .insert, schema: "public", table: "duels", filter: opponentFilter) { [weak self] payload in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                guard let raw = payload.record else { return }
+                guard let record = Self.coerceRecord(raw) else { return }
+
+                guard let challengerId = record["challenger_id"] as? String,
+                      let opponentId = record["opponent_id"] as? String,
+                      [challengerId, opponentId].contains(currentUserId) else { return }
+
+                await self.handleDuelInsert(["new": record])
+            }
+        }
+
+        channel.postgresChange(event: .update, schema: "public", table: "duels", filter: opponentFilter) { [weak self] payload in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                guard let raw = payload.record else { return }
+                guard let record = Self.coerceRecord(raw) else { return }
+
+                guard let challengerId = record["challenger_id"] as? String,
+                      let opponentId = record["opponent_id"] as? String,
+                      [challengerId, opponentId].contains(currentUserId) else { return }
+
+                await self.handleDuelUpdate(["new": record])
+            }
+        }
+
+        // Log channel errors and closures
+        channel.on(.error) { info in
+            print("❌ Duels channel error: \(info)")
+        }
+
+        channel.on(.closed) { [weak self] _ in
+            Task { @MainActor in
+                guard let self = self else { return }
+                print("⚠️ Duels channel closed; attempting resubscribe… (delay: \(self.realtimeResubscribeDelay)s)")
+                // Wait with simple exponential backoff, then try to re-setup subscriptions
+                let delayNs = UInt64(self.realtimeResubscribeDelay * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: delayNs)
+                self.setupRealtimeSubscriptions()
+                // Increase backoff for subsequent attempts, capped
+                self.realtimeResubscribeDelay = min(self.realtimeResubscribeDelay * 2, self.realtimeResubscribeMaxDelay)
+            }
+        }
+
+        channel.subscribe()
+        realtimeSubscriptions["duels"] = channel
+        // Reset backoff when (re)subscribed successfully
+        realtimeResubscribeDelay = 1.0
+
+        print("✅ Realtime subscriptions for duels (user-filtered) initialized for user: \(currentUserId)")
     }
     
     private func handleDuelUpdate(_ payload: [String: Any]) async {
@@ -90,11 +205,29 @@ class NotificationService: ObservableObject {
         
         switch status {
         case "in_progress":
+            // If we're already monitoring this duel, ignore duplicate in_progress updates
+            if let state = activeMatchNotifications[duelId], state.status == .inProgress {
+                print("ℹ️ Duplicate in_progress for duel \(duelId); ignoring")
+                return
+            }
             await startMatchMonitoring(duelId: duelId, record: record)
-        case "completed":
-            await stopMatchMonitoring(duelId: duelId)
+
         case "ended":
+            // Avoid re-triggering if already marked ended
+            if activeMatchNotifications[duelId]?.status == .ended {
+                print("ℹ️ Duplicate ended for duel \(duelId); ignoring")
+                return
+            }
             await handleMatchEnded(duelId: duelId, record: record)
+
+        case "completed":
+            // If we aren't monitoring the duel, treat as already stopped
+            if activeMatchNotifications[duelId] == nil {
+                print("ℹ️ Completed for duel \(duelId) but no active monitoring; ignoring")
+                return
+            }
+            await stopMatchMonitoring(duelId: duelId)
+
         default:
             print("ℹ️ Unhandled duel status: \(status)")
         }
@@ -114,13 +247,16 @@ class NotificationService: ObservableObject {
         print("🆕 New duel created: \(duelId)")
         
         // Send challenge notification to opponent
-        await sendDuelChallengeNotification(
-            to: opponentId,
-            from: challengerId,
-            gameType: gameType,
-            gameMode: gameMode,
-            duelId: duelId
-        )
+        guard let me = AuthService.shared.currentUser?.id else { return }
+        if opponentId == me {
+            await sendDuelChallengeNotification(
+                to: opponentId,
+                from: challengerId,
+                gameType: gameType,
+                gameMode: gameMode,
+                duelId: duelId
+            )
+        }
     }
     
     // MARK: - Match Monitoring
@@ -152,9 +288,9 @@ class NotificationService: ObservableObject {
         
         matchMonitoringTasks[duelId] = monitoringTask
         
-        // Send match started notifications
-        await sendMatchStartedNotification(to: challengerId, duelId: duelId, gameType: gameType)
-        await sendMatchStartedNotification(to: opponentId, duelId: duelId, gameType: gameType)
+        // Send match started notification only to the signed-in user on this device
+        guard let me = AuthService.shared.currentUser?.id else { return }
+        await sendMatchStartedNotification(to: me, duelId: duelId, gameType: gameType)
     }
     
     private func stopMatchMonitoring(duelId: String) async {
@@ -167,6 +303,10 @@ class NotificationService: ObservableObject {
         // Invalidate timer
         matchEndTimers[duelId]?.invalidate()
         matchEndTimers.removeValue(forKey: duelId)
+        
+        // Cancel any pending verification reminder task
+        verificationReminderTasks[duelId]?.cancel()
+        verificationReminderTasks.removeValue(forKey: duelId)
         
         // Update state
         activeMatchNotifications.removeValue(forKey: duelId)
@@ -181,9 +321,9 @@ class NotificationService: ObservableObject {
         
         print("🏁 Match ended for duel: \(duelId)")
         
-        // Send "Match Ended?" notifications to both players
-        await sendMatchEndedNotification(to: challengerId, duelId: duelId)
-        await sendMatchEndedNotification(to: opponentId, duelId: duelId)
+        // Send "Match Ended?" notification only to the signed-in user on this device
+        guard let me = AuthService.shared.currentUser?.id else { return }
+        await sendMatchEndedNotification(to: me, duelId: duelId)
         
         // Start verification timer
         startVerificationTimer(for: duelId)
@@ -201,6 +341,8 @@ class NotificationService: ObservableObject {
         let pingInterval: TimeInterval = 30 // Ping every 30 seconds
         let maxPingDuration: TimeInterval = 300 // Max 5 minutes of pinging
         
+        guard let me = AuthService.shared.currentUser?.id else { return }
+
         var pingCount = 0
         let maxPings = Int(maxPingDuration / pingInterval)
         
@@ -217,14 +359,9 @@ class NotificationService: ObservableObject {
                 
                 pingCount += 1
                 
-                // Send periodic "Match in Progress" ping
+                // Send periodic "Match in Progress" ping only to the signed-in user on this device
                 await sendMatchProgressPing(
-                    to: challengerId,
-                    duelId: duelId,
-                    pingNumber: pingCount
-                )
-                await sendMatchProgressPing(
-                    to: opponentId,
+                    to: me,
                     duelId: duelId,
                     pingNumber: pingCount
                 )
@@ -244,8 +381,7 @@ class NotificationService: ObservableObject {
         
         // If we reach max pings, send a final reminder
         if pingCount >= maxPings {
-            await sendMatchTimeoutWarning(to: challengerId, duelId: duelId)
-            await sendMatchTimeoutWarning(to: opponentId, duelId: duelId)
+            await sendMatchTimeoutWarning(to: me, duelId: duelId)
         }
     }
     
@@ -261,12 +397,22 @@ class NotificationService: ObservableObject {
         
         matchEndTimers[duelId] = timer
         
-        // Send reminder at 60 seconds
-        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
-            Task { @MainActor in
-                await self?.sendVerificationReminder(duelId: duelId)
+        // Send reminder at 60 seconds using a cancellable Task
+        // Cancel any existing reminder for this duel before scheduling a new one
+        verificationReminderTasks[duelId]?.cancel()
+        let reminderTask = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(60 * 1_000_000_000))
+                // Only send reminder if duel is still marked ended
+                if let state = self.activeMatchNotifications[duelId], state.status == .ended {
+                    await self.sendVerificationReminder(duelId: duelId)
+                }
+            } catch {
+                // Task was cancelled or failed; ignore silently
+                print("ℹ️ Verification reminder task cancelled/failed for duel: \(duelId) - \(error)")
             }
         }
+        verificationReminderTasks[duelId] = reminderTask
     }
     
     private func handleVerificationTimeout(duelId: String) async {
@@ -274,13 +420,16 @@ class NotificationService: ObservableObject {
         
         // Check if both submissions received
         do {
-            let submissions: [DuelSubmission] = try await supabaseService.fetch(from: "duel_submissions")
-            
+            guard let client = supabaseService.getClient() else { return }
+            let submissions: [DuelSubmission] = try await client
+                .from("duel_submissions")
+                .select()
+                .eq("duel_id", value: duelId)
+                .execute()
+                .value
             if submissions.count < 2 {
-                // Mark as forfeited
                 await markDuelAsForfeited(duelId)
             }
-            
         } catch {
             print("❌ Error checking submissions: \(error)")
         }
@@ -340,9 +489,16 @@ class NotificationService: ObservableObject {
     }
     
     private func scheduleNotification(_ notification: PendingNotification) async {
-        guard isAuthorized else { 
+        guard isAuthorized else {
             print("⚠️ Notifications not authorized")
-            return 
+            return
+        }
+
+        // Only schedule local notifications for the signed-in user on this device
+        guard notification.userId == AuthService.shared.currentUser?.id else {
+            // Notification persisted remotely for cross-device sync; skip local scheduling here
+            print("ℹ️ Skipping local schedule for cross-user notification: \(notification.id)")
+            return
         }
         
         let content = UNMutableNotificationContent()
@@ -773,6 +929,17 @@ class NotificationService: ObservableObject {
         } catch {
             print("❌ Error marking duel as forfeited: \(error)")
         }
+    }
+
+    // Helper to coerce various payload record shapes into [String: Any]
+    private static func coerceRecord(_ raw: Any?) -> [String: Any]? {
+        if let r = raw as? [String: Any] {
+            return r
+        }
+        if let r = raw as? [String: AnyJSON] {
+            return r.mapValues { $0.rawValue }
+        }
+        return nil
     }
 }
 
