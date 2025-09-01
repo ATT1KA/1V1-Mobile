@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @EnvironmentObject var authService: AuthService
@@ -44,6 +45,9 @@ struct ContentView: View {
                         .onAppear {
                             setupNotificationHandling()
                         }
+                        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+                            notificationService.refreshAuthorizationStatus()
+                        }
                         .toolbar {
                             ToolbarItem(placement: .navigationBarTrailing) {
                                 Button("Notify") {
@@ -60,22 +64,14 @@ struct ContentView: View {
                 AuthView()
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-            // Request notification authorization when app becomes active
-            Task {
-                await notificationService.requestAuthorization()
-            }
-        }
     }
     
     private func setupNotificationHandling() {
         // Set up notification action handling
         UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
         
-        // Request notification authorization
-        Task {
-            await notificationService.requestAuthorization()
-        }
+        // Configure notification categories (actions)
+        notificationService.setupNotificationCategories()
     }
 }
 

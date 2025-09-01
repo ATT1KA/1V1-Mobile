@@ -2,12 +2,14 @@ import SwiftUI
 
 enum OnboardingStep: Int, CaseIterable {
     case auth = 0
-    case stats = 1
-    case cardGen = 2
+    case notifications = 1
+    case stats = 2
+    case cardGen = 3
     
     var title: String {
         switch self {
         case .auth: return "Authentication"
+        case .notifications: return "Notifications"
         case .stats: return "Player Stats"
         case .cardGen: return "Generate Card"
         }
@@ -16,6 +18,7 @@ enum OnboardingStep: Int, CaseIterable {
     var description: String {
         switch self {
         case .auth: return "Sign in to get started"
+        case .notifications: return "Stay updated on your duels and challenges"
         case .stats: return "Tell us about your gaming experience"
         case .cardGen: return "Create your unique player card"
         }
@@ -52,6 +55,8 @@ class OnboardingCoordinator: ObservableObject {
         switch currentStep {
         case .auth:
             return onboardingData.isAuthenticated
+        case .notifications:
+            return onboardingData.hasHandledNotificationPermissions
         case .stats:
             return onboardingData.hasCompletedStats
         case .cardGen:
@@ -72,6 +77,9 @@ struct OnboardingData {
     var playTimePerWeek = PlayTime.medium
     var skillLevel = SkillLevel.average
     var hasCompletedStats = false
+    
+    // Notifications
+    var hasHandledNotificationPermissions = false
     
     // Card data
     var cardName = ""

@@ -45,6 +45,9 @@ struct OnboardingFlowView: View {
                     OnboardingAuthView(coordinator: coordinator)
                         .tag(OnboardingStep.auth)
                     
+                    OnboardingNotificationPermissionView(coordinator: coordinator)
+                        .tag(OnboardingStep.notifications)
+
                     OnboardingStatsView(coordinator: coordinator)
                         .tag(OnboardingStep.stats)
                     

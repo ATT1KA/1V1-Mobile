@@ -56,6 +56,16 @@ class NotificationService: ObservableObject {
             }
         }
     }
+
+    // Public method to refresh authorization status without requesting permission
+    @MainActor
+    func refreshAuthorizationStatus() {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            Task { @MainActor in
+                self.isAuthorized = settings.authorizationStatus == .authorized
+            }
+        }
+    }
     
     // MARK: - Real-time Match Monitoring
     private func setupRealtimeSubscriptions() {
