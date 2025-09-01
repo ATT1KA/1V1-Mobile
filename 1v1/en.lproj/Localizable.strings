@@ -1,0 +1,4 @@
+/* Overlay text shown while starting a match */
+"starting_match_overlay" = "Starting match...";
+
+

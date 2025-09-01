@@ -3,6 +3,9 @@ import SwiftUI
 struct DuelListView: View {
     @StateObject private var duelService = DuelService.shared
     @StateObject private var authService = AuthService.shared
+    @StateObject private var userProfileService = UserProfileService()
+    @State private var preloadedProfiles: [String: UserProfile] = [:]
+    @State private var showingProfileUserId: String? = nil
     @State private var selectedTab = 0
     @State private var showDuelProposal = false
     @State private var showDuelDetails: Duel?
@@ -60,6 +63,11 @@ struct DuelListView: View {
         }
         .sheet(item: $showDuelDetails) { duel in
             DuelDetailsView(duel: duel)
+        }
+        .sheet(isPresented: Binding(get: { showingProfileUserId != nil }, set: { if !$0 { showingProfileUserId = nil } })) {
+            if let userId = showingProfileUserId {
+                SharedProfileView(userId: userId, preloadedProfile: preloadedProfiles[userId])
+            }
         }
         .refreshable {
             await refreshDuels()
@@ -123,7 +131,12 @@ struct DuelListView: View {
                     )
                 } else {
                     ForEach(duelService.activeDuels) { duel in
-                        DuelCard(duel: duel, currentUserId: authService.currentUser?.id ?? "") {
+                        DuelCard(
+                            duel: duel,
+                            currentUserId: authService.currentUser?.id ?? "",
+                            profiles: preloadedProfiles,
+                            openProfile: { id in showingProfileUserId = id }
+                        ) {
                             showDuelDetails = duel
                         }
                     }
@@ -148,7 +161,12 @@ struct DuelListView: View {
                     )
                 } else {
                     ForEach(duelService.pendingDuels) { duel in
-                        PendingDuelCard(duel: duel, currentUserId: authService.currentUser?.id ?? "") {
+                        PendingDuelCard(
+                            duel: duel,
+                            currentUserId: authService.currentUser?.id ?? "",
+                            profiles: preloadedProfiles,
+                            openProfile: { id in showingProfileUserId = id }
+                        ) {
                             showDuelDetails = duel
                         }
                     }
@@ -173,7 +191,12 @@ struct DuelListView: View {
                     )
                 } else {
                     ForEach(duelService.completedDuels) { duel in
-                        CompletedDuelCard(duel: duel, currentUserId: authService.currentUser?.id ?? "") {
+                        CompletedDuelCard(
+                            duel: duel,
+                            currentUserId: authService.currentUser?.id ?? "",
+                            profiles: preloadedProfiles,
+                            openProfile: { id in showingProfileUserId = id }
+                        ) {
                             showDuelDetails = duel
                         }
                     }
@@ -186,6 +209,21 @@ struct DuelListView: View {
     private func loadDuels() async {
         guard let userId = authService.currentUser?.id else { return }
         await duelService.loadUserDuels(for: userId)
+
+        // Preload profiles for all users involved in duels so avatars and profile views are instant
+        let allDuels = duelService.activeDuels + duelService.pendingDuels + duelService.completedDuels
+        let userIds = Set(allDuels.flatMap { [$0.challengerId, $0.opponentId] })
+
+        var fetchTasks: [Task<UserProfile?, Never>] = []
+        for id in userIds where preloadedProfiles[id] == nil {
+            fetchTasks.append(Task { try? await userProfileService.loadUserProfile(userId: id) })
+        }
+
+        for task in fetchTasks {
+            if let profile = await task.value {
+                preloadedProfiles[profile.userId] = profile
+            }
+        }
     }
     
     private func refreshDuels() async {
@@ -236,6 +274,8 @@ struct TabButton: View {
 struct DuelCard: View {
     let duel: Duel
     let currentUserId: String
+    let profiles: [String: UserProfile]
+    let openProfile: (String) -> Void
     let onTap: () -> Void
     
     private var isChallenger: Bool {
@@ -247,8 +287,7 @@ struct DuelCard: View {
     }
     
     var body: some View {
-        Button(action: onTap) {
-            VStack(spacing: 16) {
+        VStack(spacing: 16) {
                 // Header
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
@@ -267,21 +306,19 @@ struct DuelCard: View {
                     DuelStatusBadge(status: duel.status)
                 }
                 
-                // Players
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(isChallenger ? "You" : opponent)
-                            .font(.body)
-                            .fontWeight(.medium)
-                            .foregroundColor(.white)
-                        
-                        Text("vs \(isChallenger ? opponent : "You")")
-                            .font(.caption)
-                            .foregroundColor(.white.opacity(0.7))
-                    }
-                    
+                // Players with avatars and tap-to-view profile
+                HStack(spacing: 16) {
+                    playerColumn(userId: duel.challengerId, roleLabel: "Challenger", isCurrent: duel.challengerId == currentUserId, isWinner: duel.winnerId == duel.challengerId)
+
+                    Text("VS")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.white.opacity(0.7))
+
+                    playerColumn(userId: duel.opponentId, roleLabel: "Opponent", isCurrent: duel.opponentId == currentUserId, isWinner: duel.winnerId == duel.opponentId)
+
                     Spacer()
-                    
+
                     if duel.status == .inProgress {
                         VStack(spacing: 4) {
                             Image(systemName: "gamecontroller.fill")
@@ -322,8 +359,7 @@ struct DuelCard: View {
                         lineWidth: needsAction ? 2 : 1
                     )
             )
-        }
-        .buttonStyle(PlainButtonStyle())
+        .onTapGesture { onTap() }
     }
     
     private var needsAction: Bool {
@@ -349,30 +385,79 @@ struct DuelCard: View {
     }
 }
 
+extension DuelCard {
+    @ViewBuilder
+    private func playerColumn(userId: String, roleLabel: String, isCurrent: Bool, isWinner: Bool) -> some View {
+        VStack(spacing: 6) {
+            Button(action: { openProfile(userId) }) {
+                if let profile = profiles[userId], let avatar = profile.avatarUrl, !avatar.isEmpty {
+                    AsyncImage(url: URL(string: avatar)) { image in
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } placeholder: {
+                        Image(systemName: "person.circle.fill").foregroundColor(.gray)
+                    }
+                    .frame(width: 48, height: 48)
+                    .clipShape(Circle())
+                    .overlay(Circle().stroke(isWinner ? Color.yellow : Color.white.opacity(0.3), lineWidth: 2))
+                } else {
+                    Image(systemName: "person.circle.fill")
+                        .font(.system(size: 48))
+                        .foregroundColor(.gray)
+                }
+            }
+            .buttonStyle(PlainButtonStyle())
+
+            Text(isCurrent ? "You" : (profiles[userId]?.displayName ?? roleLabel))
+                .font(.footnote)
+                .fontWeight(.medium)
+                .foregroundColor(.white)
+        }
+    }
+}
+
 struct PendingDuelCard: View {
     let duel: Duel
     let currentUserId: String
+    let profiles: [String: UserProfile]
+    let openProfile: (String) -> Void
     let onTap: () -> Void
     
     var body: some View {
-        Button(action: onTap) {
-            VStack(spacing: 16) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Challenge from Challenger")
-                            .font(.headline)
-                            .fontWeight(.bold)
-                            .foregroundColor(.white)
-                        
-                        Text("\(duel.gameType) - \(duel.gameMode)")
-                            .font(.subheadline)
-                            .foregroundColor(.white.opacity(0.8))
+        VStack(spacing: 16) {
+            HStack(spacing: 12) {
+                // Challenger avatar + name
+                if let profile = profiles[duel.challengerId], let avatar = profile.avatarUrl, !avatar.isEmpty {
+                    Button(action: { openProfile(duel.challengerId) }) {
+                        AsyncImage(url: URL(string: avatar)) { image in
+                            image.resizable().aspectRatio(contentMode: .fill)
+                        } placeholder: {
+                            Image(systemName: "person.circle.fill").foregroundColor(.gray)
+                        }
+                        .frame(width: 48, height: 48)
+                        .clipShape(Circle())
                     }
-                    
-                    Spacer()
-                    
-                    DuelStatusBadge(status: duel.status)
+                    .buttonStyle(PlainButtonStyle())
+                } else {
+                    Image(systemName: "person.circle.fill")
+                        .font(.system(size: 48))
+                        .foregroundColor(.gray)
                 }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Challenge from \(profiles[duel.challengerId]?.displayName ?? "Challenger")")
+                        .font(.headline)
+                        .fontWeight(.bold)
+                        .foregroundColor(.white)
+
+                    Text("\(duel.gameType) - \(duel.gameMode)")
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.8))
+                }
+
+                Spacer()
+
+                DuelStatusBadge(status: duel.status)
+            }
                 
                 if let message = duel.challengeMessage {
                     HStack {
@@ -400,16 +485,15 @@ struct PendingDuelCard: View {
                         .font(.caption)
                         .foregroundColor(.blue)
                 }
-            }
-            .padding(16)
-            .background(Color.orange.opacity(0.1))
-            .cornerRadius(12)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.orange, lineWidth: 2)
-            )
         }
-        .buttonStyle(PlainButtonStyle())
+        .padding(16)
+        .background(Color.orange.opacity(0.1))
+        .cornerRadius(12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.orange, lineWidth: 2)
+        )
+        .onTapGesture { onTap() }
     }
     
     private var timeUntilExpiration: String {
@@ -432,6 +516,8 @@ struct PendingDuelCard: View {
 struct CompletedDuelCard: View {
     let duel: Duel
     let currentUserId: String
+    let profiles: [String: UserProfile]
+    let openProfile: (String) -> Void
     let onTap: () -> Void
     
     private var isWinner: Bool {
@@ -473,66 +559,89 @@ struct CompletedDuelCard: View {
     }
     
     var body: some View {
-        Button(action: onTap) {
-            VStack(spacing: 16) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(duel.gameType)
-                            .font(.headline)
-                            .fontWeight(.bold)
-                            .foregroundColor(.white)
-                        
-                        Text(duel.gameMode)
-                            .font(.subheadline)
-                            .foregroundColor(.white.opacity(0.8))
-                    }
-                    
-                    Spacer()
-                    
-                    VStack(alignment: .trailing, spacing: 4) {
-                        Text(resultText)
-                            .font(.body)
-                            .fontWeight(.bold)
-                            .foregroundColor(resultColor)
-                        
-                        if duel.status == .completed && duel.verificationStatus != .forfeited {
-                            Text("\(duel.challengerScore ?? 0) - \(duel.opponentScore ?? 0)")
-                                .font(.caption)
-                                .foregroundColor(.white.opacity(0.7))
-                        }
-                    }
+        VStack(spacing: 16) {
+            HStack(spacing: 12) {
+                // Left: game info
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(duel.gameType)
+                        .font(.headline)
+                        .fontWeight(.bold)
+                        .foregroundColor(.white)
+
+                    Text(duel.gameMode)
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.8))
                 }
-                
-                HStack {
-                    Text(formatDate(duel.createdAt))
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.6))
-                    
-                    Spacer()
-                    
-                    if duel.status == .completed && isWinner {
-                        HStack(spacing: 4) {
-                            Image(systemName: "trophy.fill")
-                                .foregroundColor(.yellow)
-                                .font(.caption)
-                            
-                            Text("Victory")
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                                .foregroundColor(.yellow)
-                        }
+
+                Spacer()
+
+                // Right: result and score
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(resultText)
+                        .font(.body)
+                        .fontWeight(.bold)
+                        .foregroundColor(resultColor)
+
+                    if duel.status == .completed && duel.verificationStatus != .forfeited {
+                        Text("\(duel.challengerScore ?? 0) - \(duel.opponentScore ?? 0)")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.7))
                     }
                 }
             }
-            .padding(16)
-            .background(Color.white.opacity(0.05))
-            .cornerRadius(12)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(resultColor.opacity(0.3), lineWidth: 1)
-            )
+
+            HStack(spacing: 12) {
+                // Show challenger avatar
+                if let challengerProfile = profiles[duel.challengerId], let avatar = challengerProfile.avatarUrl, !avatar.isEmpty {
+                    Button(action: { openProfile(duel.challengerId) }) {
+                        AsyncImage(url: URL(string: avatar)) { image in
+                            image.resizable().aspectRatio(contentMode: .fill)
+                        } placeholder: {
+                            Image(systemName: "person.circle.fill").foregroundColor(.gray)
+                        }
+                        .frame(width: 40, height: 40)
+                        .clipShape(Circle())
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                } else {
+                    Image(systemName: "person.circle.fill")
+                        .font(.system(size: 40))
+                        .foregroundColor(.gray)
+                }
+
+                // Show opponent avatar
+                if let opponentProfile = profiles[duel.opponentId], let avatar = opponentProfile.avatarUrl, !avatar.isEmpty {
+                    Button(action: { openProfile(duel.opponentId) }) {
+                        AsyncImage(url: URL(string: avatar)) { image in
+                            image.resizable().aspectRatio(contentMode: .fill)
+                        } placeholder: {
+                            Image(systemName: "person.circle.fill").foregroundColor(.gray)
+                        }
+                        .frame(width: 40, height: 40)
+                        .clipShape(Circle())
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                } else {
+                    Image(systemName: "person.circle.fill")
+                        .font(.system(size: 40))
+                        .foregroundColor(.gray)
+                }
+
+                Spacer()
+
+                Text(formatDate(duel.createdAt))
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.6))
+            }
         }
-        .buttonStyle(PlainButtonStyle())
+        .padding(16)
+        .background(Color.white.opacity(0.05))
+        .cornerRadius(12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(resultColor.opacity(0.3), lineWidth: 1)
+        )
+        .onTapGesture { onTap() }
     }
     
     private func formatDate(_ date: Date) -> String {
@@ -607,13 +716,50 @@ struct EmptyStateView: View {
 // MARK: - Duel Details View
 struct DuelDetailsView: View {
     let duel: Duel
+    @State private var currentDuel: Duel
     @StateObject private var duelService = DuelService.shared
+    @StateObject private var userProfileService = UserProfileService()
+    @State private var opponentDisplayName: String = ""
+    @State private var challengerDisplayName: String = ""
+    // Local simple cache to avoid refetching profiles while view is mounted
+    @State private var profileNameCache: [String: String] = [:]
     @Environment(\.dismiss) private var dismiss
     
+    // Computed display name for the other player (not the current user).
+    // Reads from `profileNameCache` and falls back to a neutral label so the
+    // confirmation sheet never shows "vs You".
+    private var otherPlayerDisplayName: String {
+        let currentUserId = AuthService.shared.currentUser?.id
+
+        // Determine the id that is NOT the current user
+        let otherId: String
+        if currentDuel.challengerId == currentUserId {
+            otherId = currentDuel.opponentId
+        } else if currentDuel.opponentId == currentUserId {
+            otherId = currentDuel.challengerId
+        } else {
+            // If neither matches (unexpected), prefer opponentId
+            otherId = currentDuel.opponentId
+        }
+
+        let name = profileNameCache[otherId]
+        if let name = name, !name.isEmpty, name != "You" {
+            return name
+        }
+
+        return "Opponent"
+    }
     @State private var showScreenshotCapture = false
     @State private var showError = false
     @State private var errorMessage = ""
-    
+    @State private var showStartMatchConfirmation = false
+    @State private var isStarting = false
+
+    init(duel: Duel) {
+        self.duel = duel
+        _currentDuel = State(initialValue: duel)
+    }
+
     var body: some View {
         NavigationView {
             ScrollView {
@@ -653,12 +799,35 @@ struct DuelDetailsView: View {
                     .foregroundColor(.white)
                 }
             }
+            .task {
+                // Try to load freshest duel state when view appears
+                if let refreshed = try? await duelService.getDuel(currentDuel.id) {
+                    currentDuel = refreshed
+                }
+
+                await resolvePlayerNames()
+            }
+            .onReceive(duelService.$activeDuels) { duels in
+                if let updated = duels.first(where: { $0.id == currentDuel.id }) {
+                    currentDuel = updated
+                }
+            }
+            .onReceive(duelService.$pendingDuels) { duels in
+                if let updated = duels.first(where: { $0.id == currentDuel.id }) {
+                    currentDuel = updated
+                }
+            }
+            .onReceive(duelService.$completedDuels) { duels in
+                if let updated = duels.first(where: { $0.id == currentDuel.id }) {
+                    currentDuel = updated
+                }
+            }
         }
         .sheet(isPresented: $showScreenshotCapture) {
             ScreenshotCaptureView(
-                duelId: duel.id,
-                gameType: duel.gameType,
-                gameMode: duel.gameMode
+                duelId: currentDuel.id,
+                gameType: currentDuel.gameType,
+                gameMode: currentDuel.gameMode
             )
         }
         .alert("Error", isPresented: $showError) {
@@ -666,32 +835,64 @@ struct DuelDetailsView: View {
         } message: {
             Text(errorMessage)
         }
+        .sheet(isPresented: $showStartMatchConfirmation) {
+            MatchStartConfirmationView(duel: currentDuel, opponentDisplayName: otherPlayerDisplayName) {
+                Task {
+                    isStarting = true
+                    await startMatch()
+                    isStarting = false
+                }
+            }
+        }
+        .overlay(
+            Group {
+                if isStarting {
+                    ZStack {
+                        Color.black.opacity(0.45)
+                            .ignoresSafeArea()
+
+                        VStack(spacing: 12) {
+                            ProgressView()
+                                .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                .scaleEffect(1.4)
+
+                            Text(NSLocalizedString("starting_match_overlay", comment: "Overlay text shown while starting a match"))
+                                .foregroundColor(.white)
+                                .font(.headline)
+                        }
+                        .padding(20)
+                        .background(Color.black.opacity(0.6))
+                        .cornerRadius(12)
+                    }
+                }
+            }
+        )
     }
     
     private var duelInfoView: some View {
         VStack(spacing: 16) {
             HStack {
-                Image(systemName: gameIcon(for: duel.gameType))
+                Image(systemName: gameIcon(for: currentDuel.gameType))
                     .font(.title)
-                    .foregroundColor(gameColor(for: duel.gameType))
+                    .foregroundColor(gameColor(for: currentDuel.gameType))
                 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(duel.gameType)
+                    Text(currentDuel.gameType)
                         .font(.title2)
                         .fontWeight(.bold)
                         .foregroundColor(.white)
                     
-                    Text(duel.gameMode)
+                    Text(currentDuel.gameMode)
                         .font(.body)
                         .foregroundColor(.white.opacity(0.8))
                 }
                 
                 Spacer()
                 
-                DuelStatusBadge(status: duel.status)
+                DuelStatusBadge(status: currentDuel.status)
             }
             
-            if let message = duel.challengeMessage {
+            if let message = currentDuel.challengeMessage {
                 Divider()
                     .background(Color.white.opacity(0.3))
                 
@@ -721,10 +922,11 @@ struct DuelDetailsView: View {
                 // Challenger
                 PlayerInfoCard(
                     title: "Challenger",
-                    userId: duel.challengerId,
-                    score: duel.challengerScore,
-                    isWinner: duel.winnerId == duel.challengerId,
-                    isCurrentUser: duel.challengerId == AuthService.shared.currentUser?.id
+                    userId: currentDuel.challengerId,
+                    score: currentDuel.challengerScore,
+                    isWinner: currentDuel.winnerId == currentDuel.challengerId,
+                    isCurrentUser: currentDuel.challengerId == AuthService.shared.currentUser?.id
+                    , displayName: challengerDisplayName
                 )
                 
                 Text("VS")
@@ -735,10 +937,11 @@ struct DuelDetailsView: View {
                 // Opponent
                 PlayerInfoCard(
                     title: "Opponent",
-                    userId: duel.opponentId,
-                    score: duel.opponentScore,
-                    isWinner: duel.winnerId == duel.opponentId,
-                    isCurrentUser: duel.opponentId == AuthService.shared.currentUser?.id
+                    userId: currentDuel.opponentId,
+                    score: currentDuel.opponentScore,
+                    isWinner: currentDuel.winnerId == currentDuel.opponentId,
+                    isCurrentUser: currentDuel.opponentId == AuthService.shared.currentUser?.id
+                    , displayName: opponentDisplayName
                 )
             }
         }
@@ -757,10 +960,10 @@ struct DuelDetailsView: View {
                     .foregroundColor(.white)
                 
                 VStack(spacing: 8) {
-                    DuelStatusBadge(status: duel.status)
+                    DuelStatusBadge(status: currentDuel.status)
                     
-                    if duel.verificationStatus != .pending {
-                        Text("Verification: \(duel.verificationStatus.displayName)")
+                    if currentDuel.verificationStatus != .pending {
+                        Text("Verification: \(currentDuel.verificationStatus.displayName)")
                             .font(.caption)
                             .foregroundColor(.white.opacity(0.7))
                     }
@@ -777,17 +980,15 @@ struct DuelDetailsView: View {
     
     private var actionButtonsView: some View {
         VStack(spacing: 12) {
-            switch duel.status {
+            switch currentDuel.status {
             case .accepted:
                 Button("Start Match") {
-                    Task {
-                        await startMatch()
-                    }
+                    showStartMatchConfirmation = true
                 }
                 .buttonStyle(PrimaryButtonStyle())
                 
             case .inProgress:
-                if duel.endedAt != nil {
+                if currentDuel.endedAt != nil {
                     Button("Submit Screenshot") {
                         showScreenshotCapture = true
                     }
@@ -802,7 +1003,7 @@ struct DuelDetailsView: View {
                 }
                 
             case .completed:
-                if duel.winnerId == AuthService.shared.currentUser?.id {
+                if currentDuel.winnerId == AuthService.shared.currentUser?.id {
                     Button("View Victory Recap") {
                         // Navigate to victory recap
                     }
@@ -813,6 +1014,7 @@ struct DuelDetailsView: View {
                 EmptyView()
             }
         }
+        .disabled(isStarting)
     }
     
     private var timelineView: some View {
@@ -826,11 +1028,11 @@ struct DuelDetailsView: View {
                 TimelineItem(
                     icon: "plus.circle.fill",
                     title: "Challenge Proposed",
-                    time: duel.createdAt,
+                    time: currentDuel.createdAt,
                     isCompleted: true
                 )
                 
-                if let acceptedAt = duel.acceptedAt {
+                if let acceptedAt = currentDuel.acceptedAt {
                     TimelineItem(
                         icon: "checkmark.circle.fill",
                         title: "Challenge Accepted",
@@ -839,7 +1041,7 @@ struct DuelDetailsView: View {
                     )
                 }
                 
-                if let startedAt = duel.startedAt {
+                if let startedAt = currentDuel.startedAt {
                     TimelineItem(
                         icon: "play.circle.fill",
                         title: "Match Started",
@@ -848,7 +1050,7 @@ struct DuelDetailsView: View {
                     )
                 }
                 
-                if let endedAt = duel.endedAt {
+                if let endedAt = currentDuel.endedAt {
                     TimelineItem(
                         icon: "stop.circle.fill",
                         title: "Match Ended",
@@ -857,11 +1059,11 @@ struct DuelDetailsView: View {
                     )
                 }
                 
-                if duel.status == .completed {
+                if currentDuel.status == .completed {
                     TimelineItem(
                         icon: "flag.checkered.circle.fill",
                         title: "Duel Completed",
-                        time: duel.endedAt ?? Date(),
+                        time: currentDuel.endedAt ?? Date(),
                         isCompleted: true
                     )
                 }
@@ -876,10 +1078,69 @@ struct DuelDetailsView: View {
         guard let userId = AuthService.shared.currentUser?.id else { return }
         
         do {
-            try await duelService.startMatch(duel.id, by: userId)
+            try await duelService.startMatch(currentDuel.id, by: userId)
+
+            // Fetch updated duel and update local state so UI reflects new status
+            if let updated = try? await duelService.getDuel(currentDuel.id) {
+                await MainActor.run {
+                    currentDuel = updated
+                }
+            }
         } catch {
             showError = true
             errorMessage = error.localizedDescription
+        }
+    }
+
+    
+
+    private func resolvePlayerNames() async {
+        let current = AuthService.shared.currentUser?.id
+        let challengerId = currentDuel.challengerId
+        let opponentId = currentDuel.opponentId
+
+        // If cached, reuse
+        if let cachedChallenger = profileNameCache[challengerId] {
+            challengerDisplayName = cachedChallenger
+        }
+        if let cachedOpponent = profileNameCache[opponentId] {
+            opponentDisplayName = cachedOpponent
+        }
+
+        // Fetch missing profiles in parallel
+        var fetchTasks: [Task<UserProfile?, Never>] = []
+
+        if profileNameCache[challengerId] == nil {
+            fetchTasks.append(Task { try? await userProfileService.loadUserProfile(userId: challengerId) })
+        } else {
+            fetchTasks.append(Task { return nil })
+        }
+
+        if profileNameCache[opponentId] == nil {
+            fetchTasks.append(Task { try? await userProfileService.loadUserProfile(userId: opponentId) })
+        } else {
+            fetchTasks.append(Task { return nil })
+        }
+
+        // Await tasks and apply results
+        for (index, task) in fetchTasks.enumerated() {
+            let profile = await task.value
+            if let profile = profile {
+                profileNameCache[profile.userId] = profile.displayName
+                if profile.userId == challengerId {
+                    challengerDisplayName = profile.displayName
+                } else if profile.userId == opponentId {
+                    opponentDisplayName = profile.displayName
+                }
+            }
+        }
+
+        // Ensure fallbacks
+        if challengerDisplayName.isEmpty {
+            challengerDisplayName = (challengerId == current) ? "You" : "Challenger"
+        }
+        if opponentDisplayName.isEmpty {
+            opponentDisplayName = (opponentId == current) ? "You" : "Opponent"
         }
     }
     
@@ -887,7 +1148,14 @@ struct DuelDetailsView: View {
         guard let userId = AuthService.shared.currentUser?.id else { return }
         
         do {
-            try await duelService.endMatch(duel.id, by: userId)
+            try await duelService.endMatch(currentDuel.id, by: userId)
+
+            // Refresh duel state after ending match
+            if let updated = try? await duelService.getDuel(currentDuel.id) {
+                await MainActor.run {
+                    currentDuel = updated
+                }
+            }
         } catch {
             showError = true
             errorMessage = error.localizedDescription
@@ -932,6 +1200,7 @@ struct PlayerInfoCard: View {
     let score: Int?
     let isWinner: Bool
     let isCurrentUser: Bool
+    let displayName: String?
     
     @State private var user: User?
     
@@ -966,7 +1235,7 @@ struct PlayerInfoCard: View {
                 }
                 
                 // Name
-                Text(isCurrentUser ? "You" : (user?.username ?? "Player"))
+                Text(isCurrentUser ? "You" : (displayName ?? user?.username ?? "Player"))
                     .font(.body)
                     .fontWeight(.medium)
                     .foregroundColor(.white)
@@ -1030,38 +1299,7 @@ struct TimelineItem: View {
     }
 }
 
-// MARK: - Button Styles
-struct PrimaryButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundColor(.white)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
-            .background(
-                LinearGradient(
-                    colors: [Color.orange, Color.red],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-            )
-            .cornerRadius(8)
-            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
-            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
-    }
-}
-
-struct SecondaryButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundColor(.white)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
-            .background(Color.white.opacity(0.2))
-            .cornerRadius(8)
-            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
-            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
-    }
-}
+// Button styles moved to `1v1/Views/Styles/ButtonStyles.swift`
 
 // MARK: - Preview Provider
 struct DuelListView_Previews: PreviewProvider {

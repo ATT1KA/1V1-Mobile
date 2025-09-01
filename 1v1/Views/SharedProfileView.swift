@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SharedProfileView: View {
     let userId: String
+    let preloadedProfile: UserProfile?
     @StateObject private var profileService = UserProfileService()
     @Environment(\.dismiss) private var dismiss
     
@@ -80,7 +81,14 @@ struct SharedProfileView: View {
     
     private func loadProfile() async {
         isLoading = true
-        
+
+        // Use preloaded profile if available
+        if let pre = preloadedProfile {
+            profile = pre
+            isLoading = false
+            return
+        }
+
         do {
             // Load profile data from Supabase
             let userProfile = try await profileService.loadUserProfile(userId: userId)
@@ -89,7 +97,7 @@ struct SharedProfileView: View {
             showError = true
             errorMessage = "Failed to load profile: \(error.localizedDescription)"
         }
-        
+
         isLoading = false
     }
     
@@ -282,7 +290,7 @@ struct AchievementCard: View {
 
 struct SharedProfileView_Previews: PreviewProvider {
     static var previews: some View {
-        SharedProfileView(userId: "preview-user")
+        SharedProfileView(userId: "preview-user", preloadedProfile: nil)
     }
 }
 

@@ -1,0 +1,4 @@
+/* Texto superpuesto mostrado al iniciar un partido */
+"starting_match_overlay" = "Iniciando partida...";
+
+
