@@ -86,3 +86,21 @@ struct Constants {
         static let minScore = 0
     }
 }
+
+// MARK: - Events
+extension Constants {
+    struct Events {
+        static let qrSchemePrefix = "1v1mobile://event/"
+        static let nfcPayloadPrefix = "application/1v1mobile.event"
+        static let profileNfcPayloadPrefix = "application/1v1mobile.profile"
+        
+        struct Timeouts {
+            static let checkIn: TimeInterval = 10
+            static let matchmaking: TimeInterval = 15
+        }
+        
+        struct Status {
+            static let alreadyCheckedIn = "You’ve already checked into this event."
+        }
+    }
+}

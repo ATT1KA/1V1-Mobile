@@ -1,0 +1,59 @@
+[
+  {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "name": "SF Showdown",
+    "description": "Weekly competitive 1v1 tournament in San Francisco.",
+    "venue": "San Francisco - SOMA Arcade",
+    "start_time": "2025-09-05T18:00:00Z",
+    "end_time": "2025-09-05T22:00:00Z",
+    "max_attendees": 64,
+    "event_type": "tournament",
+    "metadata": {"city": "San Francisco", "state": "CA"}
+  },
+  {
+    "id": "00000000-0000-0000-0000-000000000002",
+    "name": "Oakland Open Play Night",
+    "description": "Casual meetup for all skill levels.",
+    "venue": "Oakland - Uptown Community Center",
+    "start_time": "2025-09-04T19:00:00Z",
+    "end_time": "2025-09-04T22:00:00Z",
+    "max_attendees": 50,
+    "event_type": "meetup",
+    "metadata": {"city": "Oakland", "state": "CA"}
+  },
+  {
+    "id": "00000000-0000-0000-0000-000000000003",
+    "name": "San Jose Ladder League",
+    "description": "Competitive ladder matches with live matchmaking.",
+    "venue": "San Jose - Tech Arena",
+    "start_time": "2025-09-01T16:00:00Z",
+    "end_time": "2025-09-01T20:00:00Z",
+    "max_attendees": 100,
+    "event_type": "league",
+    "metadata": {"city": "San Jose", "state": "CA"}
+  },
+  {
+    "id": "00000000-0000-0000-0000-000000000004",
+    "name": "Palo Alto Weekend Clash",
+    "description": "Weekend mini-tournament and social.",
+    "venue": "Palo Alto - Students Union",
+    "start_time": "2025-09-08T17:00:00Z",
+    "end_time": "2025-09-08T22:00:00Z",
+    "max_attendees": 80,
+    "event_type": "tournament",
+    "metadata": {"city": "Palo Alto", "state": "CA"}
+  },
+  {
+    "id": "00000000-0000-0000-0000-000000000005",
+    "name": "Bay Area Finals",
+    "description": "End-of-season finals for top players.",
+    "venue": "San Francisco - Civic Center",
+    "start_time": "2025-08-25T18:00:00Z",
+    "end_time": "2025-08-25T23:59:00Z",
+    "max_attendees": 200,
+    "event_type": "finals",
+    "metadata": {"city": "San Francisco", "state": "CA"}
+  }
+]
+
+

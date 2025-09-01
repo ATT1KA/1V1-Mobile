@@ -8,6 +8,8 @@ class NFCService: NSObject, ObservableObject {
     @Published var isScanning = false
     @Published var lastScannedProfile: UserProfile?
     @Published var errorMessage: String?
+    var scanContext: ScanContext?
+    private var ndefMessageToWrite: NFCNDEFMessage?
     
     private var nfcSession: NFCNDEFReaderSession?
     private var profileToWrite: UserProfile?
@@ -27,12 +29,8 @@ class NFCService: NSObject, ObservableObject {
     private func getUserFriendlyErrorMessage(_ error: Error) -> String {
         if let nfcError = error as? NFCReaderError {
             switch nfcError.code {
-            case .readerSessionInvalidationErrorFirstNDEFTagRead:
-                return "NFC tag read successfully"
-                            case .readerSessionInvalidationErrorUserCanceled:
-                return "NFC scanning cancelled"
             case .readerSessionInvalidationErrorUserCanceled:
-                return "NFC scanning cancelled by user"
+                return "NFC scanning cancelled"
             case .readerSessionInvalidationErrorSessionTerminatedUnexpectedly:
                 return "NFC session ended unexpectedly"
             case .readerSessionInvalidationErrorSessionTimeout:
@@ -55,7 +53,11 @@ class NFCService: NSObject, ObservableObject {
         errorMessage = nil
         
         nfcSession = NFCNDEFReaderSession(delegate: self, queue: nil, invalidateAfterFirstRead: false)
-        nfcSession?.alertMessage = "Hold your device near an NFC tag to scan a profile"
+        if let context = scanContext {
+            nfcSession?.alertMessage = context.instructions
+        } else {
+            nfcSession?.alertMessage = "Hold your device near an NFC tag to scan a profile"
+        }
         nfcSession?.begin()
     }
     
@@ -81,58 +83,139 @@ class NFCService: NSObject, ObservableObject {
         nfcSession?.alertMessage = "Hold your device near an NFC tag to write your profile"
         nfcSession?.begin()
     }
+    func writeEventCheckInToTag(eventId: String) async {
+        guard NFCNDEFReaderSession.readingAvailable else {
+            errorMessage = "NFC is not available on this device"
+            return
+        }
+        isScanning = true
+        errorMessage = nil
+        profileToWrite = nil
+        scanContext = .eventCheckIn(eventId: eventId)
+        
+        // Prepare payload
+        guard let payloadString = ScanContext.eventCheckIn(eventId: eventId).encodedPayloadString(),
+              let payloadData = payloadString.data(using: .utf8) else {
+            errorMessage = "Failed to encode NFC payload"
+            return
+        }
+        let record = NFCNDEFPayload(
+            format: .media,
+            type: Constants.Events.nfcPayloadPrefix.data(using: .utf8)!,
+            identifier: Data(),
+            payload: payloadData
+        )
+        ndefMessageToWrite = NFCNDEFMessage(records: [record])
+        
+        nfcSession = NFCNDEFReaderSession(delegate: self, queue: nil, invalidateAfterFirstRead: false)
+        nfcSession?.alertMessage = scanContext?.instructions ?? "Hold your device near an NFC tag"
+        nfcSession?.begin()
+    }
     
     // MARK: - Profile Sharing
     func shareProfile(_ profile: UserProfile) async {
+        // Build envelope and Supabase client
+        guard let envelope = ScanContext.profileSharing(profile).encodedPayloadString() else { return }
+        guard let client = supabaseService.getClient() else { return }
+
+        // Convert UserProfile to a native JSON object for `profile_data`
+        var rawProfileJSON: Any = ["id": profile.userId]
+        if let encodedProfile = try? JSONEncoder().encode(profile),
+           let jsonObject = try? JSONSerialization.jsonObject(with: encodedProfile, options: []) as? [String: Any] {
+            rawProfileJSON = jsonObject
+        } else {
+            print("Warning: failed to encode UserProfile to JSON; storing minimal profile info")
+        }
+
+        // Convert envelope to JSON if possible so `profile_data_envelope` is stored as native JSON
+        var envelopeJSON: Any = envelope
+        if let data = envelope.data(using: .utf8),
+           let jsonObject = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] {
+            envelopeJSON = jsonObject
+        }
+
+        // Primary insert: store raw profile JSON in `profile_data` and include `profile_data_envelope` as a separate column
+        var insertData: [String: Any] = [
+            "user_id": profile.userId,
+            "shared_at": ISO8601DateFormatter().string(from: Date()),
+            "share_method": "nfc",
+            "profile_data": rawProfileJSON,
+            "profile_data_envelope": envelopeJSON
+        ]
+
         do {
-            // Log the sharing event to Supabase
-            _ = [
+            let response = try await client
+                .from("profile_shares")
+                .insert(insertData)
+                .execute()
+            print("Profile share logged: \(response)")
+            return
+        } catch {
+            // If the DB doesn't have `profile_data_envelope`, retry by nesting the envelope under `_envelope` inside `profile_data`.
+            print("Insert with profile_data_envelope failed, retrying by nesting envelope: \(error)")
+
+            var nestedProfileData: Any = rawProfileJSON
+            if var dict = rawProfileJSON as? [String: Any] {
+                dict["_envelope"] = envelopeJSON
+                nestedProfileData = dict
+            } else {
+                nestedProfileData = ["_raw": rawProfileJSON, "_envelope": envelopeJSON]
+            }
+
+            let fallbackInsert: [String: Any] = [
                 "user_id": profile.userId,
                 "shared_at": ISO8601DateFormatter().string(from: Date()),
                 "share_method": "nfc",
-                "profile_data": try JSONEncoder().encode(profile)
+                "profile_data": nestedProfileData
             ]
-            
-            guard let client = supabaseService.getClient() else { return }
-            let response = try await client
-                .from("profile_shares")
-                .insert([
-                    "user_id": profile.userId,
-                    "shared_at": ISO8601DateFormatter().string(from: Date()),
-                    "share_method": "nfc",
-                    "profile_data": String(data: try JSONEncoder().encode(profile), encoding: .utf8) ?? ""
-                ])
-                .execute()
-            
-            print("Profile share logged: \(response)")
-        } catch {
-            print("Error logging profile share: \(error)")
+
+            do {
+                let fallbackResponse = try await client
+                    .from("profile_shares")
+                    .insert(fallbackInsert)
+                    .execute()
+                print("Profile share logged (fallback): \(fallbackResponse)")
+            } catch {
+                print("Fallback insert failed: \(error)")
+            }
         }
     }
     
     // MARK: - Profile Parsing
-    private func parseProfileFromNDEFMessage(_ message: NFCNDEFMessage) -> UserProfile? {
+    enum ParseResult {
+        case profile(UserProfile)
+        case event(String)
+    }
+
+    private func parseFromNDEFMessage(_ message: NFCNDEFMessage) -> ParseResult? {
         for record in message.records {
-            guard record.typeNameFormat == .absoluteURI || record.typeNameFormat == .nfcWellKnown,
-                  let payload = String(data: record.payload, encoding: .utf8) else {
-                continue
-            }
-            
-            // Try to parse as JSON profile data
+            guard let payload = String(data: record.payload, encoding: .utf8) else { continue }
+
+            // 1) Try to parse as JSON profile data
             if let data = payload.data(using: .utf8),
                let profile = try? JSONDecoder().decode(UserProfile.self, from: data) {
-                return profile
+                return .profile(profile)
             }
-            
-            // Try to parse as URL with profile ID
-            if let url = URL(string: payload),
-               url.scheme == "1v1mobile",
-               let profileId = url.host {
-                // Fetch profile from Supabase using ID
-                Task {
-                    await fetchProfileFromId(profileId)
+
+            // 2) Try to parse via ScanContext for event check-in
+            if let context = ScanContext.fromPayloadString(payload) {
+                switch context {
+                case .eventCheckIn(let eventId):
+                    return .event(eventId)
+                case .profileSharing(let profile):
+                    return .profile(profile)
                 }
-                return nil
+            }
+
+            // 3) Try to parse as URL scheme
+            if let url = URL(string: payload), url.scheme == "1v1mobile" {
+                if url.host == "profile", let profileId = url.pathComponents.last {
+                    Task { await fetchProfileFromId(profileId) }
+                    continue
+                }
+                if url.host == "event", let eventId = url.pathComponents.last {
+                    return .event(eventId)
+                }
             }
         }
         return nil
@@ -162,8 +245,9 @@ class NFCService: NSObject, ObservableObject {
     
     private func createNDEFMessage(for profile: UserProfile) -> NFCNDEFMessage? {
         do {
-            let profileData = try JSONEncoder().encode(profile)
-            let profileString = String(data: profileData, encoding: .utf8) ?? ""
+            // Use the ScanContext envelope for the profile payload so scanners can detect `scanType` first
+            guard let envelope = ScanContext.profileSharing(profile).encodedPayloadString() else { return nil }
+            let profileString = envelope
             
             // Validate data size for NFC tag
             if profileString.count > 1000 {
@@ -171,8 +255,8 @@ class NFCService: NSObject, ObservableObject {
             }
             
             let record = NFCNDEFPayload(
-                format: .absoluteURI,
-                type: "application/1v1mobile.profile".data(using: .utf8)!,
+                format: .media,
+                type: Constants.Events.profileNfcPayloadPrefix.data(using: .utf8) ?? Data(),
                 identifier: Data(),
                 payload: profileString.data(using: .utf8)!
             )
@@ -196,9 +280,6 @@ extension NFCService: NFCNDEFReaderSessionDelegate {
                 case .readerSessionInvalidationErrorUserCanceled:
                     // User cancelled
                     break
-                case .readerSessionInvalidationErrorFirstNDEFTagRead:
-                    // Successfully read a tag
-                    break
                 default:
                     self.errorMessage = "NFC Error: \(readerError.localizedDescription)"
                 }
@@ -208,18 +289,30 @@ extension NFCService: NFCNDEFReaderSessionDelegate {
     
     nonisolated func readerSession(_ session: NFCNDEFReaderSession, didDetectNDEFs messages: [NFCNDEFMessage]) {
         guard let message = messages.first else { return }
-        
+
         DispatchQueue.main.async {
-            if let profile = self.parseProfileFromNDEFMessage(message) {
-                self.lastScannedProfile = profile
-                Task {
-                    await self.shareProfile(profile)
+            if let result = self.parseFromNDEFMessage(message) {
+                switch result {
+                case .profile(let profile):
+                    self.lastScannedProfile = profile
+                    Task {
+                        await self.shareProfile(profile)
+                    }
+                    session.alertMessage = "Profile scanned successfully!"
+                case .event(let eventId):
+                    Task { @MainActor in
+                        let ok = await EventService.shared.checkInToEvent(eventId: eventId, method: .nfc)
+                        if ok {
+                            self.errorMessage = nil
+                            session.alertMessage = ScanContext.eventCheckIn(eventId: eventId).successMessage
+                            NotificationCenter.default.post(name: Notification.Name("EventCheckInSucceeded"), object: nil, userInfo: ["eventId": eventId])
+                        }
+                    }
                 }
-                session.alertMessage = "Profile scanned successfully!"
             } else {
                 self.errorMessage = "Invalid profile data on NFC tag"
             }
-            
+
             session.invalidate()
         }
     }
@@ -277,6 +370,27 @@ extension NFCService: NFCNDEFReaderSessionDelegate {
                         }
                         session.invalidate()
                     }
+                } else if let messageToWrite = self.ndefMessageToWrite {
+                    // Writing custom event payload
+                    if messageToWrite.length > capacity {
+                        DispatchQueue.main.async {
+                            self.errorMessage = "NFC tag doesn't have enough capacity for event data"
+                        }
+                        session.invalidate()
+                        return
+                    }
+                    tag.writeNDEF(messageToWrite) { error in
+                        DispatchQueue.main.async {
+                            if let error = error {
+                                self.errorMessage = "Failed to write to NFC tag: \(self.getUserFriendlyErrorMessage(error))"
+                            } else {
+                                self.errorMessage = nil
+                                session.alertMessage = "Event check-in tag written successfully!"
+                            }
+                            self.ndefMessageToWrite = nil
+                        }
+                        session.invalidate()
+                    }
                 } else {
                     // Reading mode
                     tag.readNDEF { message, error in
@@ -287,21 +401,32 @@ extension NFCService: NFCNDEFReaderSessionDelegate {
                             session.invalidate()
                             return
                         }
-                        
+
                         if let message = message {
                             DispatchQueue.main.async {
-                                if let profile = self.parseProfileFromNDEFMessage(message) {
-                                    self.lastScannedProfile = profile
-                                    Task {
-                                        await self.shareProfile(profile)
+                                if let result = self.parseFromNDEFMessage(message) {
+                                    switch result {
+                                    case .profile(let profile):
+                                        self.lastScannedProfile = profile
+                                        Task {
+                                            await self.shareProfile(profile)
+                                        }
+                                        session.alertMessage = ScanContext.profileSharing(profile).successMessage
+                                    case .event(let eventId):
+                                        Task { @MainActor in
+                                            let ok = await EventService.shared.checkInToEvent(eventId: eventId, method: .nfc)
+                                            if ok {
+                                                self.errorMessage = nil
+                                                session.alertMessage = ScanContext.eventCheckIn(eventId: eventId).successMessage
+                                            }
+                                        }
                                     }
-                                    session.alertMessage = "Profile scanned successfully!"
                                 } else {
                                     self.errorMessage = "Invalid profile data on NFC tag"
                                 }
                             }
                         }
-                        
+
                         session.invalidate()
                     }
                 }
@@ -311,6 +436,9 @@ extension NFCService: NFCNDEFReaderSessionDelegate {
         // Clear profile to write after operation
         Task { @MainActor in
             self.profileToWrite = nil
+            self.ndefMessageToWrite = nil
         }
     }
 }
+
+// MARK: - Event NFC Writing

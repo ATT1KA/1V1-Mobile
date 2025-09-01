@@ -81,16 +81,26 @@ class AuthService: ObservableObject {
             
             if let profile = profiles.first {
                 currentUser = profile
+                // Load preferences into the shared PreferencesService
+                await PreferencesService.shared.loadFromServer()
             } else {
                 // Create a basic user profile if none exists
                 currentUser = User(id: userId, email: supabaseUser?.email ?? "")
+                // Ensure preferences default is set
+                await PreferencesService.shared.loadFromServer()
             }
         } catch {
             print("Error loading user profile: \(error)")
             // Create a basic user profile on error
             currentUser = User(id: userId, email: supabaseUser?.email ?? "")
+            // Ensure preferences default is set
+            await PreferencesService.shared.loadFromServer()
         }
     }
+
+    // MARK: - Preferences Sync
+
+    // Preference syncing is handled by PreferencesService.loadFromServer()
     
     // MARK: - Authentication
     

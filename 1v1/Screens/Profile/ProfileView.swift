@@ -1,7 +1,9 @@
 import SwiftUI
+import Supabase
 
 struct ProfileView: View {
     @EnvironmentObject var authService: AuthService
+    @EnvironmentObject var preferences: PreferencesService
     @State private var showingSignOutAlert = false
     @State private var showingDeleteAccountAlert = false
     
@@ -61,6 +63,24 @@ struct ProfileView: View {
                     
                     NavigationLink(destination: Text("About")) {
                         Label("About", systemImage: "info.circle")
+                    }
+                    
+                    Toggle(isOn: $preferences.eventsEnabled) {
+                        Label("Enable Event Check-in & Matchmaking", systemImage: "calendar.badge.checkmark")
+                    }
+                    .onChange(of: preferences.eventsEnabled) { newValue in
+                        Task {
+                            guard let client = SupabaseService.shared.getClient() else { return }
+                            do {
+                                let params: [String: AnyJSON] = [
+                                    "p_key": AnyJSON.string("events_enabled"),
+                                    "p_value": AnyJSON.bool(newValue)
+                                ]
+                                try await client.rpc("set_user_preference", params: params).execute()
+                            } catch {
+                                print("Failed to call set_user_preference RPC from ProfileView: \(error)")
+                            }
+                        }
                     }
                 }
                 
@@ -122,5 +142,6 @@ struct ProfileView_Previews: PreviewProvider {
     static var previews: some View {
         ProfileView()
             .environmentObject(AuthService.shared)
+            .environmentObject(PreferencesService.shared)
     }
 }

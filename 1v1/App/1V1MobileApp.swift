@@ -28,6 +28,7 @@ struct _1V1MobileApp: App {
                 .environmentObject(authService)
                 .environmentObject(navigationManager)
                 .environmentObject(notificationService)
+                .environmentObject(PreferencesService.shared)
                 .onOpenURL { url in
                     // Let Google Sign-In try to handle first
                     if GIDSignIn.sharedInstance.handle(url) {

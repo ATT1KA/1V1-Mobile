@@ -3,6 +3,32 @@ import Supabase
 
 class SupabaseService: ObservableObject {
     static let shared = SupabaseService()
+    static let jsonDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        // Support fractional seconds in ISO8601 from Supabase
+        if #available(iOS 11.2, *) {
+            let iso = ISO8601DateFormatter()
+            iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            decoder.dateDecodingStrategy = .custom { decoder in
+                let container = try decoder.singleValueContainer()
+                let string = try container.decode(String.self)
+                // Try fractional seconds first
+                if let date = iso.date(from: string) {
+                    return date
+                }
+                // Fallback without fractional seconds
+                let fallback = ISO8601DateFormatter()
+                fallback.formatOptions = [.withInternetDateTime]
+                if let date = fallback.date(from: string) {
+                    return date
+                }
+                throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid ISO8601 date: \(string)")
+            }
+        } else {
+            decoder.dateDecodingStrategy = .iso8601
+        }
+        return decoder
+    }()
     
     private var client: SupabaseClient?
     
@@ -29,6 +55,39 @@ class SupabaseService: ObservableObject {
     
     func getClient() -> SupabaseClient? {
         return client
+    }
+
+    // MARK: - Utilities
+
+    /// Normalize a value returned from Supabase that may be JSON stored as `jsonb`, `text`,
+    /// or the client's `AnyJSON` wrapper. Returns a parsed object (`[String: Any]` / `Array`) when possible,
+    /// or the original value as a `String` otherwise.
+    static func normalizeJSONField(_ value: Any?) -> Any? {
+        guard let value = value else { return nil }
+
+        // If already a native Foundation JSON object
+        if let dict = value as? [String: Any] {
+            return dict
+        }
+        if let arr = value as? [Any] {
+            return arr
+        }
+
+        // If Supabase client returns AnyJSON, unwrap rawValue
+        if let anyJson = value as? AnyJSON {
+            return anyJson.rawValue
+        }
+
+        // If it's a string, try to parse as JSON
+        if let str = value as? String {
+            if let data = str.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data, options: []) {
+                return obj
+            }
+            return str
+        }
+
+        return value
     }
     
     // MARK: - Database Operations

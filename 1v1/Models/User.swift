@@ -11,6 +11,7 @@ struct User: Codable, Identifiable {
     let lastSeen: Date?
     let stats: UserStats?
     let cardId: String?
+    let isEventAdmin: Bool?
     
     enum CodingKeys: String, CodingKey {
         case id
@@ -23,9 +24,10 @@ struct User: Codable, Identifiable {
         case lastSeen = "last_seen"
         case stats
         case cardId = "card_id"
+        case isEventAdmin = "is_event_admin"
     }
     
-    init(id: String, email: String, createdAt: Date? = nil, updatedAt: Date? = nil, username: String? = nil, avatarUrl: String? = nil, isOnline: Bool? = nil, lastSeen: Date? = nil, stats: UserStats? = nil, cardId: String? = nil) {
+    init(id: String, email: String, createdAt: Date? = nil, updatedAt: Date? = nil, username: String? = nil, avatarUrl: String? = nil, isOnline: Bool? = nil, lastSeen: Date? = nil, stats: UserStats? = nil, cardId: String? = nil, isEventAdmin: Bool? = nil) {
         self.id = id
         self.email = email
         self.createdAt = createdAt
@@ -36,6 +38,7 @@ struct User: Codable, Identifiable {
         self.lastSeen = lastSeen
         self.stats = stats
         self.cardId = cardId
+        self.isEventAdmin = isEventAdmin
     }
 }
 

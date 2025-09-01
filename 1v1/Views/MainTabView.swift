@@ -3,6 +3,7 @@ import SwiftUI
 struct MainTabView: View {
     @EnvironmentObject var authService: AuthService
     @EnvironmentObject var notificationService: NotificationService
+    @EnvironmentObject var preferences: PreferencesService
     @StateObject private var duelService = DuelService.shared
     @State private var selectedTab = 0
     @State private var unreadNotificationCount = 0
@@ -23,6 +24,15 @@ struct MainTabView: View {
                 }
                 .badge(duelService.pendingDuels.count > 0 ? "\(duelService.pendingDuels.count)" : nil)
                 .tag(1)
+
+            if preferences.eventsEnabled {
+                EventListView()
+                    .tabItem {
+                        Image(systemName: "calendar")
+                        Text("Events")
+                    }
+                    .tag(2)
+            }
             
             ProfileView()
                 .tabItem {
@@ -30,7 +40,7 @@ struct MainTabView: View {
                     Text("Profile")
                 }
                 .badge(unreadNotificationCount > 0 ? "\(unreadNotificationCount)" : nil)
-                .tag(2)
+                .tag(preferences.eventsEnabled ? 3 : 2)
         }
         .onAppear {
             loadNotificationCount()
@@ -86,5 +96,6 @@ struct MainTabView_Previews: PreviewProvider {
     static var previews: some View {
         MainTabView()
             .environmentObject(AuthService.shared)
+            .environmentObject(PreferencesService.shared)
     }
 }
