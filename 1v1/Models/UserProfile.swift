@@ -92,3 +92,9 @@ struct UserProfile: Codable, Identifiable {
         return from(data: data)
     }
 }
+
+extension UserProfile: Equatable {
+    static func == (lhs: UserProfile, rhs: UserProfile) -> Bool {
+        return lhs.id == rhs.id
+    }
+}

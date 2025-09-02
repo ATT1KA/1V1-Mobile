@@ -45,13 +45,12 @@ class PreferencesService: ObservableObject {
 
         do {
             let result = try await client.from("profiles")
-                .select(columns: "preferences")
+                .select("preferences")
                 .eq("id", value: userId)
                 .execute()
 
-            if let data = result.data,
-               let parsed = try JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-               let first = parsed.first,
+            let parsed = try JSONSerialization.jsonObject(with: result.data) as? [[String: Any]]
+            if let first = parsed?.first,
                let prefs = first["preferences"] as? [String: Any],
                let value = prefs["events_enabled"] as? Bool {
                 await MainActor.run { self.eventsEnabled = value }

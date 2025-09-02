@@ -4,16 +4,25 @@ import Combine
 import Supabase
 
 @MainActor
-class NotificationService: ObservableObject {
+class NotificationService: ObservableObject, NotificationServicing {
     static let shared = NotificationService()
     
     @Published var isAuthorized = false
     @Published var pendingNotifications: [PendingNotification] = []
     @Published var activeMatchNotifications: [String: MatchNotificationState] = [:]
+    @Published var debugLog: [String] = []
+
+    // Expose a lightweight, test-friendly view of queued notifications
+    // Tests typically inspect string identifiers from mocks; provide a
+    // computed representation derived from pendingNotifications.
+    var queuedNotifications: [String] {
+        pendingNotifications.map { $0.id }
+    }
     
-    private let supabaseService = SupabaseService.shared
+    private let supabaseService: SupabaseServicing
     private var cancellables = Set<AnyCancellable>()
-    private var realtimeSubscriptions: [String: RealtimeChannel] = [:]
+    // Map of subscription keys to subscription identifiers returned by the provider
+    private var realtimeSubscriptions: [String: String] = [:]
     private var matchEndTimers: [String: Timer] = [:]
     private var matchMonitoringTasks: [String: Task<Void, Never>] = [:]
     private var verificationReminderTasks: [String: Task<Void, Never>] = [:]
@@ -27,13 +36,22 @@ class NotificationService: ObservableObject {
     private var realtimeResubscribeDelay: TimeInterval = 1.0
     private let realtimeResubscribeMaxDelay: TimeInterval = 32.0
     
-    private init() {
+    init(supabaseService: SupabaseServicing = RealSupabaseAdapter.shared) {
+        self.supabaseService = supabaseService
         checkAuthorizationStatus()
         // Wire realtime subscriptions to auth state changes
         authCancellable = AuthService.shared.$currentUser.sink { [weak self] user in
             Task { await self?.authStateChanged(user: user) }
         }
         startNotificationDeliveryQueue()
+    }
+
+    // MARK: - Debug Logging
+    @MainActor
+    private func appendDebugLog(_ entry: String) {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        self.debugLog.insert("\(timestamp): \(entry)", at: 0)
+        if self.debugLog.count > 200 { self.debugLog.removeLast() }
     }
 
     private var authCancellable: AnyCancellable?
@@ -47,9 +65,9 @@ class NotificationService: ObservableObject {
         intentionallyUnsubscribed = true
 
         // Unsubscribe from any active realtime channels
-        for (key, channel) in realtimeSubscriptions {
-            print("ℹ️ Unsubscribing realtime channel: \(key)")
-            channel.unsubscribe()
+        for (key, subscriptionId) in realtimeSubscriptions {
+            print("ℹ️ Unsubscribing realtime subscription: \(key)")
+            supabaseService.unsubscribe(subscriptionId: subscriptionId)
         }
         realtimeSubscriptions.removeAll()
         matchEndTimers.values.forEach { $0.invalidate() }
@@ -105,6 +123,68 @@ class NotificationService: ObservableObject {
             }
         }
     }
+
+    /// Test / debug helper to simulate changing the authorization status
+    @MainActor
+    func setAuthorizationStatus(_ status: Bool) {
+        self.isAuthorized = status
+    }
+
+    // MARK: - Debug/Testing Controls for Supabase
+    @MainActor
+    func simulateConnectionLoss() {
+        if let mock = supabaseService as? MockSupabaseAdapter {
+            mock.simulateConnectionLoss()
+            appendDebugLog("Simulated Supabase connection loss")
+        } else {
+            appendDebugLog("simulateConnectionLoss: supabaseService is not a mock")
+        }
+    }
+
+    @MainActor
+    func reconnectSupabase() {
+        if let mock = supabaseService as? MockSupabaseAdapter {
+            mock.reconnect()
+            appendDebugLog("Simulated Supabase reconnect")
+        } else {
+            appendDebugLog("reconnectSupabase: supabaseService is not a mock")
+        }
+    }
+
+    @MainActor
+    func emitRemoteDuelInsert(record: [String: Any]) {
+        if let mock = supabaseService as? MockSupabaseAdapter {
+            mock.emitDuelInsert(record: record)
+            appendDebugLog("Emitted duel insert event: \(record["id"] ?? "unknown")")
+        } else {
+            appendDebugLog("emitRemoteDuelInsert: supabaseService is not a mock")
+        }
+    }
+
+    @MainActor
+    func emitRemoteDuelUpdate(record: [String: Any], oldRecord: Any?) {
+        if let mock = supabaseService as? MockSupabaseAdapter {
+            mock.emitDuelUpdate(record: record, oldRecord: oldRecord)
+            appendDebugLog("Emitted duel update event: \(record["id"] ?? "unknown")")
+        } else {
+            appendDebugLog("emitRemoteDuelUpdate: supabaseService is not a mock")
+        }
+    }
+
+    @MainActor
+    func emitCrossDeviceEvent() {
+        // Create a dummy record that would be published by another device
+        let record: [String: Any] = [
+            "id": "cross-device-\(UUID().uuidString)",
+            "challenger_id": "other-device-user",
+            "opponent_id": AuthService.shared.currentUser?.id ?? "test-user",
+            "status": "in_progress",
+            "game_type": "Debug Game",
+            "game_mode": "Casual"
+        ]
+        emitRemoteDuelInsert(record: record)
+        appendDebugLog("Emitted cross-device event for duel \(record["id"] ?? "unknown")")
+    }
     
     // MARK: - Real-time Match Monitoring
     private func setupRealtimeSubscriptions() {
@@ -118,11 +198,11 @@ class NotificationService: ObservableObject {
             return
         }
 
-        // If an existing duels channel exists (from a previous subscribe attempt), clear it
-        // to avoid overlapping channels when resubscribing.
-        if let existing = realtimeSubscriptions["duels"] {
-            print("ℹ️ Clearing existing duels channel before (re)subscribing")
-            existing.unsubscribe()
+        // If an existing duels subscription exists (from a previous subscribe attempt), clear it
+        // to avoid overlapping subscriptions when resubscribing.
+        if let existingId = realtimeSubscriptions["duels"] {
+            print("ℹ️ Clearing existing duels subscription before (re)subscribing")
+            supabaseService.unsubscribe(subscriptionId: existingId)
             realtimeSubscriptions.removeValue(forKey: "duels")
         }
 
@@ -130,111 +210,70 @@ class NotificationService: ObservableObject {
         // the .closed handler knows resubscribe attempts are allowed.
         intentionallyUnsubscribed = false
 
-        let channel = client.realtime.channel("realtime:public:duels")
+        // Subscribe via the injected supabase service so tests can inject a mock that
+        // simulates realtime events.
+        let subscriptionId = supabaseService.subscribeToDuels(
+            for: currentUserId,
+            onInsert: { [weak self] record in
+                Task { @MainActor [weak self] in
+                    guard let self = self else { return }
+                    guard let challengerId = record["challenger_id"] as? String,
+                          let opponentId = record["opponent_id"] as? String,
+                          [challengerId, opponentId].contains(currentUserId) else { return }
 
-        // Register two filtered handlers (one per player column) using inline postgresChange closures.
-        // Filter for challenger changes
-        let challengerFilter = "challenger_id=eq.\(currentUserId)"
-        channel.postgresChange(event: .insert, schema: "public", table: "duels", filter: challengerFilter) { [weak self] payload in
-            Task { @MainActor [weak self] in
-                guard let self = self else { return }
-                guard let raw = payload.record else { return }
-                guard let record = Self.coerceRecord(raw) else { return }
-
-                guard let challengerId = record["challenger_id"] as? String,
-                      let opponentId = record["opponent_id"] as? String,
-                      [challengerId, opponentId].contains(currentUserId) else { return }
-
-                await self.handleDuelInsert(["new": record])
-            }
-        }
-
-        channel.postgresChange(event: .update, schema: "public", table: "duels", filter: challengerFilter) { [weak self] payload in
-            Task { @MainActor [weak self] in
-                guard let self = self else { return }
-                guard let raw = payload.record else { return }
-                guard let record = Self.coerceRecord(raw) else { return }
-                await self.processUpdateRecord(record: record, oldRaw: payload.oldRecord)
-            }
-        }
-
-        // Filter for opponent changes
-        let opponentFilter = "opponent_id=eq.\(currentUserId)"
-        channel.postgresChange(event: .insert, schema: "public", table: "duels", filter: opponentFilter) { [weak self] payload in
-            Task { @MainActor [weak self] in
-                guard let self = self else { return }
-                guard let raw = payload.record else { return }
-                guard let record = Self.coerceRecord(raw) else { return }
-
-                guard let challengerId = record["challenger_id"] as? String,
-                      let opponentId = record["opponent_id"] as? String,
-                      [challengerId, opponentId].contains(currentUserId) else { return }
-
-                await self.handleDuelInsert(["new": record])
-            }
-        }
-
-        channel.postgresChange(event: .update, schema: "public", table: "duels", filter: opponentFilter) { [weak self] payload in
-            Task { @MainActor [weak self] in
-                guard let self = self else { return }
-                guard let raw = payload.record else { return }
-                guard let record = Self.coerceRecord(raw) else { return }
-                await self.processUpdateRecord(record: record, oldRaw: payload.oldRecord)
-            }
-        }
-
-        // Log channel errors and closures
-        channel.on(.error) { info in
-            print("❌ Duels channel error: \(info)")
-        }
-
-        // Reset backoff only when we receive a confirmed subscribed/join event on the channel —
-        // this avoids resetting the delay prematurely when subscribe() is called but
-        // the connection fails. Use `.subscribed` (join confirmation) if available.
-        channel.on(.subscribed) { [weak self] _ in
-            Task { @MainActor in
-                guard let self = self else { return }
-                print("✅ Duels channel subscribed; resetting resubscribe backoff")
-                self.realtimeResubscribeDelay = 1.0
-            }
-        }
-
-        channel.on(.closed) { [weak self] _ in
-            Task { @MainActor in
-                guard let self = self else { return }
-
-                // If we intentionally unsubscribed (cleanupResources), don't attempt to resubscribe.
-                if self.intentionallyUnsubscribed {
-                    print("ℹ️ Duels channel closed intentionally; skipping resubscribe")
-                    return
+                    await self.handleDuelInsert(["new": record])
                 }
+            },
+            onUpdate: { [weak self] record, oldRaw in
+                Task { @MainActor [weak self] in
+                    guard let self = self else { return }
+                    guard let challengerId = record["challenger_id"] as? String,
+                          let opponentId = record["opponent_id"] as? String,
+                          [challengerId, opponentId].contains(currentUserId) else { return }
 
-                print("⚠️ Duels channel closed; attempting resubscribe… (delay: \(self.realtimeResubscribeDelay)s)")
-                // Clear any lingering channel reference to avoid overlapping channels
-                if let existing = self.realtimeSubscriptions["duels"] {
-                    print("ℹ️ Clearing lingering duels channel before resubscribe")
-                    existing.unsubscribe()
-                    self.realtimeSubscriptions.removeValue(forKey: "duels")
+                    await self.processUpdateRecord(record: record, oldRaw: oldRaw)
                 }
-                // Wait with simple exponential backoff, then try to re-setup subscriptions
-                let delayNs = UInt64(self.realtimeResubscribeDelay * 1_000_000_000)
-                try? await Task.sleep(nanoseconds: delayNs)
-
-                // Only attempt resubscribe if a user is still signed in
-                guard AuthService.shared.currentUser != nil else {
-                    print("ℹ️ No signed-in user after channel closed; skipping resubscribe")
-                    return
+            },
+            onSubscribed: { [weak self] in
+                Task { @MainActor in
+                    guard let self = self else { return }
+                    print("✅ Duels subscription subscribed; resetting resubscribe backoff")
+                    self.realtimeResubscribeDelay = 1.0
                 }
+            },
+            onClosed: { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self = self else { return }
 
-                self.setupRealtimeSubscriptions()
+                    if self.intentionallyUnsubscribed {
+                        print("ℹ️ Duels subscription closed intentionally; skipping resubscribe")
+                        return
+                    }
 
-                // Increase backoff for subsequent attempts, capped
-                self.realtimeResubscribeDelay = min(self.realtimeResubscribeDelay * 2, self.realtimeResubscribeMaxDelay)
+                    print("⚠️ Duels subscription closed; attempting resubscribe… (delay: \(self.realtimeResubscribeDelay)s)")
+                    // Clear any lingering subscription reference to avoid overlapping subscriptions
+                    if let existing = self.realtimeSubscriptions["duels"] {
+                        print("ℹ️ Clearing lingering duels subscription before resubscribe")
+                        supabaseService.unsubscribe(subscriptionId: existing)
+                        self.realtimeSubscriptions.removeValue(forKey: "duels")
+                    }
+
+                    let delayNs = UInt64(self.realtimeResubscribeDelay * 1_000_000_000)
+                    try? await Task.sleep(nanoseconds: delayNs)
+
+                    guard AuthService.shared.currentUser != nil else {
+                        print("ℹ️ No signed-in user after subscription closed; skipping resubscribe")
+                        return
+                    }
+
+                    self.setupRealtimeSubscriptions()
+
+                    self.realtimeResubscribeDelay = min(self.realtimeResubscribeDelay * 2, self.realtimeResubscribeMaxDelay)
+                }
             }
-        }
+        )
 
-        channel.subscribe()
-        realtimeSubscriptions["duels"] = channel
+        realtimeSubscriptions["duels"] = subscriptionId
 
         print("✅ Realtime subscriptions for duels (user-filtered) initialized for user: \(currentUserId)")
     }
@@ -267,6 +306,7 @@ class NotificationService: ObservableObject {
     }
 
     // Extracted central status-change processor to reduce branching duplication
+    @MainActor
     private func processDuelStatusChange(duelId: String, newStatus: String, record: [String: Any]) async {
         print("🔄 Duel update received: \(duelId) - Status: \(newStatus)")
 
@@ -330,6 +370,12 @@ class NotificationService: ObservableObject {
 
         await processDuelStatusChange(duelId: duelId, newStatus: status, record: record)
     }
+
+    // Public helper for tests to inject duel payloads (simulates realtime updates)
+    @MainActor
+    func receiveDuelPayload(_ payload: [String: Any]) async {
+        await handleDuelUpdate(payload)
+    }
     
     private func handleDuelInsert(_ payload: [String: Any]) async {
         guard let record = payload["new"] as? [String: Any],
@@ -358,6 +404,7 @@ class NotificationService: ObservableObject {
     }
     
     // MARK: - Match Monitoring
+    @MainActor
     private func startMatchMonitoring(duelId: String, record: [String: Any]) async {
         guard let gameType = record["game_type"] as? String,
               let challengerId = record["challenger_id"] as? String,
@@ -391,6 +438,7 @@ class NotificationService: ObservableObject {
         await sendMatchStartedNotification(to: me, duelId: duelId, gameType: gameType)
     }
     
+    @MainActor
     private func stopMatchMonitoring(duelId: String) async {
         print("⏹️ Stopping match monitoring for duel: \(duelId)")
         
@@ -410,6 +458,7 @@ class NotificationService: ObservableObject {
         activeMatchNotifications.removeValue(forKey: duelId)
     }
     
+    @MainActor
     private func handleMatchEnded(duelId: String, record: [String: Any]) async {
         guard let challengerId = record["challenger_id"] as? String,
               let opponentId = record["opponent_id"] as? String else { 
@@ -448,9 +497,14 @@ class NotificationService: ObservableObject {
             do {
                 try await Task.sleep(nanoseconds: UInt64(pingInterval * 1_000_000_000))
                 
-                // Check if match is still active
-                guard let state = activeMatchNotifications[duelId],
-                      state.status == .inProgress else {
+                // Check if match is still active (read on main actor)
+                var isStillActive = false
+                await MainActor.run {
+                    if let state = activeMatchNotifications[duelId], state.status == .inProgress {
+                        isStillActive = true
+                    }
+                }
+                guard isStillActive else {
                     print("🛑 Match monitoring stopped for duel: \(duelId)")
                     break
                 }
@@ -464,11 +518,13 @@ class NotificationService: ObservableObject {
                     pingNumber: pingCount
                 )
                 
-                // Update last ping time
-                if var updatedState = activeMatchNotifications[duelId] {
-                    updatedState.lastPingTime = Date()
-                    updatedState.pingCount = pingCount
-                    activeMatchNotifications[duelId] = updatedState
+                // Update last ping time (perform mutation on main actor)
+                await MainActor.run {
+                    if var updatedState = activeMatchNotifications[duelId] {
+                        updatedState.lastPingTime = Date()
+                        updatedState.pingCount = pingCount
+                        activeMatchNotifications[duelId] = updatedState
+                    }
                 }
                 
             } catch {
@@ -601,6 +657,7 @@ class NotificationService: ObservableObject {
         await scheduleNotification(notification)
     }
     
+    @MainActor
     private func scheduleNotification(_ notification: PendingNotification) async {
         guard isAuthorized else {
             print("⚠️ Notifications not authorized")
@@ -1023,8 +1080,11 @@ class NotificationService: ObservableObject {
     }
     
     // MARK: - Helper Methods
+    @MainActor
     private func queueNotification(_ notification: PendingNotification) async {
         notificationDeliveryQueue.append(notification)
+        // Keep a public, observable list of pending notifications for tests and debugging
+        self.pendingNotifications.append(notification)
         print("📬 Notification queued: \(notification.type.rawValue) for user \(notification.userId)")
     }
     
@@ -1074,7 +1134,7 @@ class NotificationService: ObservableObject {
     }
 
     // Helper to coerce various payload record shapes into [String: Any]
-    private static func coerceRecord(_ raw: Any?) -> [String: Any]? {
+    static func coerceRecord(_ raw: Any?) -> [String: Any]? {
         // Recursive helper to convert AnyJSON / nested containers into Foundation types
         func convertValue(_ value: Any) -> Any {
             // Unwrap AnyJSON wrappers

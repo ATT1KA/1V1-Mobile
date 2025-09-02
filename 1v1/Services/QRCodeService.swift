@@ -345,49 +345,69 @@ class QRCodeService: ObservableObject {
                 envelopeJSON = jsonObject
             }
 
-            // Primary insert: store raw profile JSON and include envelope column
-            var insertData: [String: Any] = [
-                "user_id": profile.userId,
-                "shared_at": ISO8601DateFormatter().string(from: Date()),
-                "share_method": "qr_code",
-                "profile_data": rawProfileJSON,
-                "profile_data_envelope": envelopeJSON
-            ]
+            // Build an encodable payload to satisfy the Supabase client insert API.
+            struct ProfileShareInsert: Encodable {
+                let user_id: String
+                let shared_at: String
+                let share_method: String
+                let profile_data: String // JSON string
+                let profile_data_envelope: String?
+            }
+
+            // Serialize profile_data and envelope to JSON strings
+            func jsonString(from any: Any) -> String? {
+                if let data = try? JSONSerialization.data(withJSONObject: any, options: []) {
+                    return String(data: data, encoding: .utf8)
+                }
+                return nil
+            }
+
+            let profileDataString = jsonString(from: rawProfileJSON) ?? "{}"
+            let envelopeString = jsonString(from: envelopeJSON)
+
+            let insertPayload = ProfileShareInsert(
+                user_id: profile.userId,
+                shared_at: ISO8601DateFormatter().string(from: Date()),
+                share_method: "qr_code",
+                profile_data: profileDataString,
+                profile_data_envelope: envelopeString
+            )
 
             do {
                 let response = try await client
                     .from("profile_shares")
-                    .insert(insertData)
+                    .insert(insertPayload)
                     .execute()
                 print("Profile share logged: \(response)")
                 return
             } catch {
-                // Fallback: if DB doesn't accept `profile_data_envelope`, nest envelope under `_envelope` in profile_data
+                // Fallback: nest envelope inside profile_data JSON and retry
                 print("Insert with profile_data_envelope failed, retrying by nesting envelope: \(error)")
 
-                var nestedProfileData: Any = rawProfileJSON
-                if var dict = rawProfileJSON as? [String: Any] {
+                // Attempt to merge envelope into profile JSON string
+                if var dict = (try? JSONSerialization.jsonObject(with: Data(profileDataString.utf8), options: []) as? [String: Any]) {
                     dict["_envelope"] = envelopeJSON
-                    nestedProfileData = dict
+                    let mergedProfileString = jsonString(from: dict) ?? profileDataString
+
+                    let fallbackPayload = ProfileShareInsert(
+                        user_id: profile.userId,
+                        shared_at: ISO8601DateFormatter().string(from: Date()),
+                        share_method: "qr_code",
+                        profile_data: mergedProfileString,
+                        profile_data_envelope: nil
+                    )
+
+                    do {
+                        let fallbackResponse = try await client
+                            .from("profile_shares")
+                            .insert(fallbackPayload)
+                            .execute()
+                        print("Profile share logged (fallback): \(fallbackResponse)")
+                    } catch {
+                        print("Fallback insert failed: \(error)")
+                    }
                 } else {
-                    nestedProfileData = ["_raw": rawProfileJSON, "_envelope": envelopeJSON]
-                }
-
-                let fallbackInsert: [String: Any] = [
-                    "user_id": profile.userId,
-                    "shared_at": ISO8601DateFormatter().string(from: Date()),
-                    "share_method": "qr_code",
-                    "profile_data": nestedProfileData
-                ]
-
-                do {
-                    let fallbackResponse = try await client
-                        .from("profile_shares")
-                        .insert(fallbackInsert)
-                        .execute()
-                    print("Profile share logged (fallback): \(fallbackResponse)")
-                } catch {
-                    print("Fallback insert failed: \(error)")
+                    print("Could not merge envelope into profile data; aborting fallback")
                 }
             }
         }
