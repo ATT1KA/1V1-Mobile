@@ -54,6 +54,10 @@ class NotificationService: ObservableObject {
         realtimeSubscriptions.removeAll()
         matchEndTimers.values.forEach { $0.invalidate() }
         matchMonitoringTasks.values.forEach { $0.cancel() }
+
+        // Cancel any pending verification reminder tasks (prevents reminders firing post sign-out)
+        verificationReminderTasks.values.forEach { $0.cancel() }
+        verificationReminderTasks.removeAll()
     }
 
     private func authStateChanged(user: User?) async {
@@ -215,7 +219,15 @@ class NotificationService: ObservableObject {
                 // Wait with simple exponential backoff, then try to re-setup subscriptions
                 let delayNs = UInt64(self.realtimeResubscribeDelay * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: delayNs)
+
+                // Only attempt resubscribe if a user is still signed in
+                guard AuthService.shared.currentUser != nil else {
+                    print("ℹ️ No signed-in user after channel closed; skipping resubscribe")
+                    return
+                }
+
                 self.setupRealtimeSubscriptions()
+
                 // Increase backoff for subsequent attempts, capped
                 self.realtimeResubscribeDelay = min(self.realtimeResubscribeDelay * 2, self.realtimeResubscribeMaxDelay)
             }
@@ -559,15 +571,30 @@ class NotificationService: ObservableObject {
     }
     
     private func deliverNotification(_ notification: PendingNotification) async {
-        // Save to database for cross-device sync
-        do {
-            try await supabaseService.insert(into: "notifications", values: notification)
-            print("✅ Notification saved to database: \(notification.id)")
-        } catch {
-            print("❌ Error saving notification: \(error)")
-            // Re-queue for retry
-            notificationDeliveryQueue.append(notification)
-            return
+        // Decide whether to persist remotely. Policy:
+        // - If `persistRemotely` is explicitly set, obey it.
+        // - If `persistRemotely` is nil, persist only when the notification is not targeted
+        //   at the signed-in user on this device (i.e., cross-device sync only).
+        let shouldPersistRemotely: Bool
+        if let explicit = notification.persistRemotely {
+            shouldPersistRemotely = explicit
+        } else {
+            shouldPersistRemotely = notification.userId != AuthService.shared.currentUser?.id
+        }
+
+        if shouldPersistRemotely {
+            // Save to database for cross-device sync
+            do {
+                try await supabaseService.insert(into: "notifications", values: notification)
+                print("✅ Notification saved to database: \(notification.id)")
+            } catch {
+                print("❌ Error saving notification: \(error)")
+                // Re-queue for retry
+                notificationDeliveryQueue.append(notification)
+                return
+            }
+        } else {
+            print("ℹ️ Skipping remote persistence for device-local notification: \(notification.id)")
         }
         
         // Send local push notification
@@ -1048,12 +1075,57 @@ class NotificationService: ObservableObject {
 
     // Helper to coerce various payload record shapes into [String: Any]
     private static func coerceRecord(_ raw: Any?) -> [String: Any]? {
+        // Recursive helper to convert AnyJSON / nested containers into Foundation types
+        func convertValue(_ value: Any) -> Any {
+            // Unwrap AnyJSON wrappers
+            if let anyJson = value as? AnyJSON {
+                return convertValue(anyJson.rawValue)
+            }
+
+            // Dictionary with AnyJSON values
+            if let dictAnyJSON = value as? [String: AnyJSON] {
+                var out: [String: Any] = [:]
+                for (k, v) in dictAnyJSON {
+                    out[k] = convertValue(v)
+                }
+                return out
+            }
+
+            // Dictionary with Any values (may contain nested AnyJSON)
+            if let dictAny = value as? [String: Any] {
+                var out: [String: Any] = [:]
+                for (k, v) in dictAny {
+                    out[k] = convertValue(v)
+                }
+                return out
+            }
+
+            // Array of AnyJSON
+            if let arrAnyJSON = value as? [AnyJSON] {
+                return arrAnyJSON.map { convertValue($0) }
+            }
+
+            // Array of Any (may contain nested AnyJSON)
+            if let arrAny = value as? [Any] {
+                return arrAny.map { convertValue($0) }
+            }
+
+            // Fallback: return the value as-is
+            return value
+        }
+
         if let r = raw as? [String: Any] {
             return r
         }
+
         if let r = raw as? [String: AnyJSON] {
-            return r.mapValues { $0.rawValue }
+            var out: [String: Any] = [:]
+            for (k, v) in r {
+                out[k] = convertValue(v)
+            }
+            return out
         }
+
         return nil
     }
 }
