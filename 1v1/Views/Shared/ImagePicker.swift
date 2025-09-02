@@ -59,9 +59,14 @@ struct ImagePicker: UIViewControllerRepresentable {
                     return
                 }
 
-                // Compression preview
-                if let data = corrected.jpegData(compressionQuality: parent.quality) {
-                    parent.onCompressionPreview?(data.count)
+                // Compression preview using progressive compressor (5 MB target)
+                let targetBytes = 5 * 1024 * 1024
+                do {
+                    let result = try ImageCompressionUtility.shared.compressImageProgressively(image: corrected, targetMaxBytes: targetBytes)
+                    parent.onCompressionPreview?(result.finalSize)
+                } catch {
+                    // Indicate compression failure via a distinct negative code (-2)
+                    parent.onCompressionPreview?(-2)
                 }
 
                 // Assign final image

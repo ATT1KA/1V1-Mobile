@@ -15,7 +15,7 @@ class OCRVerificationService: ObservableObject {
     private let supabaseService = SupabaseService.shared
     private let storageService = StorageService()
     private let gameConfigService = GameConfigurationService.shared
-    private var activeProcessingTasks: [String: Task<Void, Never>] = [:]
+    private var activeProcessingTasks: [String: Task<DuelSubmission, Error>] = [:]
     
     private init() {}
     
@@ -23,6 +23,17 @@ class OCRVerificationService: ObservableObject {
         // Cancel all active tasks
         activeProcessingTasks.values.forEach { $0.cancel() }
         activeProcessingTasks.removeAll()
+    }
+
+    // MARK: - Cancellation
+    @MainActor
+    func cancelActiveWork() {
+        // Cancel any active processing Tasks directly
+        activeProcessingTasks.values.forEach { $0.cancel() }
+        activeProcessingTasks.removeAll()
+        isProcessing = false
+        processingProgress = 0.0
+        errorMessage = nil
     }
     
     // MARK: - Main Processing Entry Point
@@ -33,75 +44,107 @@ class OCRVerificationService: ObservableObject {
         gameType: String,
         gameMode: String
     ) async throws -> DuelSubmission {
-        
         isProcessing = true
         processingProgress = 0.0
-        
+
         defer {
             isProcessing = false
             processingProgress = 0.0
         }
-        
+
+        // Create the actual processing Task and store it directly so cancellation affects
+        // the Task executing `runProcessing(...)`.
+        let processingTask = Task<DuelSubmission, Error> { @MainActor in
+            return try await runProcessing(for: duelId, userId: userId, image: image, gameType: gameType, gameMode: gameMode)
+        }
+
+        // Store handle so callers can cancel the processing Task directly
+        activeProcessingTasks[duelId] = processingTask
+        defer {
+            // Remove stored handle when done
+            activeProcessingTasks.removeValue(forKey: duelId)
+        }
+
         do {
-            // Load game-specific configuration
-            processingProgress = 0.1
-            let config = try await gameConfigService.getConfiguration(for: gameType, mode: gameMode)
-            
-            // Upload screenshot first
-            processingProgress = 0.2
-            let screenshotUrl = try await uploadScreenshot(image: image, duelId: duelId, userId: userId)
-            
-            // Apply game-specific preprocessing
-            processingProgress = 0.3
-            let processedImage = try await applyPreprocessing(
-                image: image,
-                steps: config.ocrSettings.preprocessingSteps
-            )
-            
-            // Perform region-specific OCR
-            processingProgress = 0.5
-            let ocrResults = try await performRegionBasedOCR(
-                image: processedImage,
-                regions: config.ocrSettings.regions,
-                patterns: config.ocrSettings.textPatterns,
-                threshold: config.ocrSettings.confidenceThreshold
-            )
-            
-            // Validate results against game-specific rules
-            processingProgress = 0.7
-            let validatedResults = try await validateOCRResults(
-                results: ocrResults,
-                validation: config.scoreValidation,
-                duelId: duelId
-            )
-            
-            // Create submission
-            processingProgress = 0.9
-            let submission = DuelSubmission(
-                id: UUID().uuidString,
-                duelId: duelId,
-                userId: userId,
-                screenshotUrl: screenshotUrl,
-                ocrResult: validatedResults,
-                submittedAt: Date(),
-                verifiedAt: nil,
-                confidence: validatedResults.confidence,
-                gameConfigurationVersion: config.version
-            )
-            
-            // Save to database
-            try await supabaseService.insert(into: "duel_submissions", values: submission)
-            
-            // Check if both submissions received for auto-verification
-            await checkDuelVerification(duelId: duelId)
-            
-            processingProgress = 1.0
+            let submission = try await processingTask.value
             return submission
-            
         } catch {
-            errorMessage = "Screenshot processing failed: \(error.localizedDescription)"
+            // Map cancellation into a friendly state
+            if Task.isCancelled {
+                errorMessage = "Processing canceled"
+            } else {
+                errorMessage = "Screenshot processing failed: \(error.localizedDescription)"
+            }
             throw error
         }
+    }
+
+    @MainActor
+    private func runProcessing(
+        for duelId: String,
+        userId: String,
+        image: UIImage,
+        gameType: String,
+        gameMode: String
+    ) async throws -> DuelSubmission {
+        // Load game-specific configuration
+        processingProgress = 0.1
+        let config = try await gameConfigService.getConfiguration(for: gameType, mode: gameMode)
+
+        // Upload screenshot first (we store the storage path and request signed URLs when needed)
+        processingProgress = 0.2
+        try Task.checkCancellation()
+        let screenshotPath = try await uploadScreenshot(image: image, duelId: duelId, userId: userId)
+
+        // Apply game-specific preprocessing
+        processingProgress = 0.3
+        try Task.checkCancellation()
+        let processedImage = try await applyPreprocessing(
+            image: image,
+            steps: config.ocrSettings.preprocessingSteps
+        )
+
+        // Perform region-specific OCR
+        processingProgress = 0.5
+        try Task.checkCancellation()
+        let ocrResults = try await performRegionBasedOCR(
+            image: processedImage,
+            regions: config.ocrSettings.regions,
+            patterns: config.ocrSettings.textPatterns,
+            threshold: config.ocrSettings.confidenceThreshold
+        )
+
+        // Validate results against game-specific rules
+        processingProgress = 0.7
+        try Task.checkCancellation()
+        let validatedResults = try await validateOCRResults(
+            results: ocrResults,
+            validation: config.scoreValidation,
+            duelId: duelId
+        )
+
+        // Create submission
+        processingProgress = 0.9
+        let submission = DuelSubmission(
+            id: UUID().uuidString,
+            duelId: duelId,
+            userId: userId,
+            storagePath: screenshotPath,
+            ocrResult: validatedResults,
+            submittedAt: Date(),
+            verifiedAt: nil,
+            confidence: validatedResults.confidence,
+            gameConfigurationVersion: config.version
+        )
+
+        // Save to database
+        try await supabaseService.insert(into: "duel_submissions", values: submission)
+
+        // Check if both submissions received for auto-verification
+        await checkDuelVerification(duelId: duelId)
+
+        processingProgress = 1.0
+        return submission
     }
     
     // MARK: - Image Preprocessing
@@ -117,6 +160,7 @@ class OCRVerificationService: ObservableObject {
         var processedImage = CIImage(cgImage: cgImage)
         
         for step in steps {
+            try Task.checkCancellation()
             switch step {
             case .enhanceContrast:
                 processedImage = try enhanceContrast(image: processedImage)
@@ -155,6 +199,7 @@ class OCRVerificationService: ObservableObject {
         let startTime = Date()
         
         for region in regions {
+            try Task.checkCancellation()
             // Crop image to region
             let croppedImage = cropImage(image: image, to: region.coordinates)
             
@@ -377,7 +422,8 @@ class OCRVerificationService: ObservableObject {
     // MARK: - Helper Methods
     private func uploadScreenshot(image: UIImage, duelId: String, userId: String) async throws -> String {
         let timestamp = Int(Date().timeIntervalSince1970)
-        let screenshotPath = "duel_submissions/\(duelId)/\(userId)_\(timestamp).jpg"
+        // Store screenshots under a user-first folder structure to align with RLS policies
+        let screenshotPath = "\(userId)/\(duelId)/\(timestamp).jpg"
 
         // Prepare metadata
         let metadata: [String: String] = [
@@ -390,7 +436,8 @@ class OCRVerificationService: ObservableObject {
         var lastError: Error?
         for attempt in 1...3 {
             do {
-                let (url, finalSize) = try await storageService.uploadImageOptimized(
+                try Task.checkCancellation()
+                let (storagePath, url, finalSize) = try await storageService.uploadImageOptimized(
                     image: image,
                     bucket: "duel-screenshots",
                     path: screenshotPath,
@@ -409,7 +456,8 @@ class OCRVerificationService: ObservableObject {
                     print("Upload complete: finalSize=\(finalSize) bytes, compressionRatio=\(compressionRatio)")
                 }
 
-                return url
+                // Return the storage path (callers should request a signed URL when they need to download)
+                return storagePath
             } catch {
                 lastError = error
                 if attempt < 3 {
