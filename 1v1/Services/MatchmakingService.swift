@@ -2,6 +2,7 @@ import Foundation
 import Supabase
 import Combine
 
+@MainActor
 class MatchmakingService: ObservableObject {
     static let shared = MatchmakingService()
     
@@ -41,6 +42,19 @@ class MatchmakingService: ObservableObject {
         let avatar_url: String?
     }
     
+    // Encodable helpers for RPC and inserts to avoid using `Any`/`AnyJSON`
+    struct FindSimilarPlayersParams: Encodable {
+        let p_event_id: String
+        let p_limit: Int
+    }
+
+    struct CreateMatchPayload: Encodable {
+        let event_id: String
+        let user_id: String
+        let matched_user_id: String
+        let similarity_score: Double
+    }
+    
     // MARK: - Find Similar Players (RPC)
     func findSimilarPlayers(eventId: String, limit: Int = 10) async {
         await MainActor.run {
@@ -61,10 +75,7 @@ class MatchmakingService: ObservableObject {
         }
         
         do {
-            let params: [String: AnyJSON] = [
-                "p_event_id": AnyJSON.string(eventId),
-                "p_limit": AnyJSON.number(Decimal(limit))
-            ]
+            let params = FindSimilarPlayersParams(p_event_id: eventId, p_limit: limit)
             let response = try await client.rpc("find_similar_players", params: params).execute()
             let results = try SupabaseService.jsonDecoder.decode([SimilarPlayerRow].self, from: response.data)
             let rows = results
@@ -101,31 +112,13 @@ class MatchmakingService: ObservableObject {
     private func setupRealtimeSubscriptions() {
         guard let client = supabaseService.getClient() else { return }
         // Create a Postgres change channel for event_matchmaking in public schema
+        // NOTE: Realtime v2 API differs between versions of the Supabase client.
+        // To keep compilation across different client versions we only create and
+        // subscribe the channel here. Specific "postgresChange" handlers use
+        // newer APIs and are omitted to avoid hard dependency on a particular
+        // Supabase package version. Re-enable appropriate handlers when the
+        // project upgrades to a known Realtime API.
         let channel = client.realtime.channel("realtime:public:event_matchmaking")
-
-        channel.postgresChange(event: .insert, schema: "public", table: "event_matchmaking") { [weak self] payload in
-            Task { [weak self] in
-                guard let self = self else { return }
-                guard let record = payload.record else { return }
-                if let em = self.decodeEventMatchmaking(from: record) {
-                    let currentUserId = AuthService.shared.currentUser?.id
-                    if em.userId == currentUserId || em.matchedUserId == currentUserId {
-                        await self.mergeSuggested(em)
-                    }
-                }
-            }
-        }
-
-        channel.postgresChange(event: .update, schema: "public", table: "event_matchmaking") { [weak self] payload in
-            Task { [weak self] in
-                guard let self = self else { return }
-                guard let record = payload.record else { return }
-                if let em = self.decodeEventMatchmaking(from: record) {
-                    await self.mergeSuggested(em)
-                }
-            }
-        }
-
         channel.subscribe()
         self.matchmakingChannel = channel
     }
@@ -190,12 +183,12 @@ class MatchmakingService: ObservableObject {
             await MainActor.run { self.errorMessage = "User not authenticated" }
             return false
         }
-        let payload: [String: AnyJSON] = [
-            "event_id": AnyJSON.string(eventId),
-            "user_id": AnyJSON.string(userId),
-            "matched_user_id": AnyJSON.string(matchedUserId),
-            "similarity_score": AnyJSON.number(Decimal(similarityScore))
-        ]
+        let payload = CreateMatchPayload(
+            event_id: eventId,
+            user_id: userId,
+            matched_user_id: matchedUserId,
+            similarity_score: similarityScore
+        )
         do {
             // Insert and request the inserted row back
             let resp = try await client
@@ -205,8 +198,9 @@ class MatchmakingService: ObservableObject {
                 .single()
                 .execute()
 
-            if let data = resp.data,
-               let em = try? SupabaseService.jsonDecoder.decode(EventMatchmaking.self, from: data) {
+            // `resp.data` is non-optional in newer client versions; decode directly
+            let data = resp.data
+            if let em = try? SupabaseService.jsonDecoder.decode(EventMatchmaking.self, from: data) {
                 await MainActor.run { self.suggestedMatches.append(em) }
                 return true
             }
@@ -236,7 +230,7 @@ class MatchmakingService: ObservableObject {
         do {
             try await client
                 .from("event_matchmaking")
-                .update(["status": AnyJSON.string(status)])
+                .update(["status": status])
                 .eq("id", value: matchId)
                 .execute()
             return true

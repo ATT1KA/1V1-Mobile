@@ -5,6 +5,7 @@ struct ContentView: View {
     @EnvironmentObject var authService: AuthService
     @EnvironmentObject var navigationManager: NavigationManager
     @EnvironmentObject var notificationService: NotificationService
+    @State private var showNotificationTestPanel = false
     
     var body: some View {
         Group {
@@ -50,12 +51,48 @@ struct ContentView: View {
                         }
                         .toolbar {
                             ToolbarItem(placement: .navigationBarTrailing) {
-                                Button("Notify") {
-                                    Task { @MainActor in
-                                        await notificationService.scheduleTestNotificationIn(seconds: 5)
+#if DEBUG
+                                Menu {
+                                    Button("Quick Test (5s)") {
+                                        Task { @MainActor in
+                                            await notificationService.scheduleTestNotificationIn(seconds: 5)
+                                        }
                                     }
+                                    Button("Match Start Test") {
+                                        Task { @MainActor in
+                                            await notificationService.sendMatchStartedNotification(
+                                                to: AuthService.shared.currentUser?.id ?? "test-user",
+                                                duelId: "test-duel",
+                                                gameType: "Test Game"
+                                            )
+                                        }
+                                    }
+                                    Button("Match End Test") {
+                                        Task { @MainActor in
+                                            await notificationService.sendMatchEndedNotification(
+                                                to: AuthService.shared.currentUser?.id ?? "test-user",
+                                                duelId: "test-duel"
+                                            )
+                                        }
+                                    }
+                                    Button("Permission Test") {
+                                        Task { @MainActor in
+                                            _ = await notificationService.requestAuthorization()
+                                        }
+                                    }
+                                    Button("Debug Panel") {
+                                        showNotificationTestPanel = true
+                                    }
+                                } label: {
+                                    Text("Notify")
                                 }
+#endif
                             }
+                        }
+
+                        .sheet(isPresented: $showNotificationTestPanel) {
+                            NotificationTestView()
+                                .environmentObject(notificationService)
                         }
                 } else {
                     OnboardingFlowView()

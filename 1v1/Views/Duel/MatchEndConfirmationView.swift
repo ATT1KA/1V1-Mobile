@@ -115,7 +115,27 @@ struct MatchEndConfirmationView: View {
 
 struct MatchEndConfirmationView_Previews: PreviewProvider {
     static var previews: some View {
-        MatchEndConfirmationView(duel: Duel(id: "test", challengerId: "a", opponentId: "b", gameType: "Game", gameMode: "Mode", status: .inProgress, createdAt: Date(), expiresAt: Date()), opponentDisplayName: "Opponent") {
+        MatchEndConfirmationView(duel: Duel(
+            id: "test",
+            challengerId: "a",
+            opponentId: "b",
+            gameType: "Game",
+            gameMode: "Mode",
+            status: .inProgress,
+            createdAt: Date(),
+            acceptedAt: nil,
+            startedAt: nil,
+            endedAt: nil,
+            winnerId: nil,
+            loserId: nil,
+            challengerScore: nil,
+            opponentScore: nil,
+            verificationStatus: .pending,
+            verificationMethod: nil,
+            disputeStatus: nil,
+            expiresAt: Date(),
+            challengeMessage: nil
+        ), opponentDisplayName: "Opponent") {
             // preview action
         }
         .preferredColorScheme(.dark)

@@ -144,7 +144,8 @@ struct DuelSubmission: Codable, Identifiable {
     let id: String
     let duelId: String
     let userId: String
-    let screenshotUrl: String
+    /// Storage path inside the storage bucket (e.g. `userId/duelId/ts.jpg`).
+    let storagePath: String
     let ocrResult: OCRResult?
     let submittedAt: Date
     let verifiedAt: Date?
@@ -155,7 +156,7 @@ struct DuelSubmission: Codable, Identifiable {
         case id
         case duelId = "duel_id"
         case userId = "user_id"
-        case screenshotUrl = "screenshot_url"
+        case storagePath = "storage_path"
         case ocrResult = "ocr_result"
         case submittedAt = "submitted_at"
         case verifiedAt = "verified_at"

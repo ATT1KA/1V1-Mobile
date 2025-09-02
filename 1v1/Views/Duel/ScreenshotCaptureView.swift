@@ -17,6 +17,12 @@ struct ScreenshotCaptureView: View {
     @State private var isLoading = false
     @State private var showError = false
     @State private var errorMessage = ""
+    @State private var showRetryAvailable = false
+    @State private var uploadTask: Task<Void, Never>? = nil
+    @State private var showToast: Bool = false
+    @State private var toastMessage: String = ""
+    @State private var selectedQuality: CGFloat = 0.8
+    @State private var compressionPreviewSize: Int? = nil
     @State private var gameConfig: GameConfiguration?
     @State private var timeRemaining: TimeInterval = 180 // 3 minutes
     @State private var timer: Timer?
@@ -70,14 +76,44 @@ struct ScreenshotCaptureView: View {
                 .foregroundColor(.white)
             )
         }
+        .overlay(alignment: .top) {
+            if showToast {
+                Text(toastMessage)
+                    .font(.subheadline)
+                    .foregroundColor(.white)
+                    .padding(12)
+                    .background(Color.black.opacity(0.8))
+                    .cornerRadius(10)
+                    .padding(.top, 20)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .zIndex(1)
+            }
+        }
         .sheet(isPresented: $showImagePicker) {
-            ImagePicker(selectedImage: $capturedImage, sourceType: .photoLibrary)
+            ImagePicker(selectedImage: $capturedImage, sourceType: .photoLibrary, quality: selectedQuality, onCompressionPreview: { size in
+                DispatchQueue.main.async {
+                    compressionPreviewSize = size
+                }
+            })
         }
         .sheet(isPresented: $showCamera) {
-            ImagePicker(selectedImage: $capturedImage, sourceType: .camera)
+            ImagePicker(selectedImage: $capturedImage, sourceType: .camera, quality: selectedQuality, onCompressionPreview: { size in
+                DispatchQueue.main.async {
+                    compressionPreviewSize = size
+                }
+            })
         }
         .alert("Error", isPresented: $showError) {
-            Button("OK") { }
+            if showRetryAvailable {
+                Button("Retry") {
+                    Task {
+                        await submitScreenshot()
+                    }
+                }
+                Button("OK") { }
+            } else {
+                Button("OK") { }
+            }
         } message: {
             Text(errorMessage)
         }
@@ -100,6 +136,23 @@ struct ScreenshotCaptureView: View {
         }
         .onDisappear {
             stopTimer()
+        }
+        .onChange(of: selectedQuality) { newValue in
+            guard let image = capturedImage else { return }
+            // Re-run the progressive compressor for preview (target 5 MB)
+            Task {
+                let targetBytes = 5 * 1024 * 1024
+                do {
+                    let result = try ImageCompressionUtility.shared.compressImageProgressively(image: image, targetMaxBytes: targetBytes)
+                    DispatchQueue.main.async {
+                        compressionPreviewSize = result.finalSize
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        compressionPreviewSize = -2 // compression failure
+                    }
+                }
+            }
         }
     }
     
@@ -276,7 +329,22 @@ struct ScreenshotCaptureView: View {
     }
     
     private var captureOptionsView: some View {
-        HStack(spacing: 16) {
+        VStack(spacing: 12) {
+            // Quality selector
+            HStack(spacing: 12) {
+                Text("Quality")
+                    .font(.caption)
+                    .foregroundColor(.white)
+
+                Picker("Quality", selection: $selectedQuality) {
+                    Text("High").tag(CGFloat(0.9))
+                    Text("Medium").tag(CGFloat(0.7))
+                    Text("Low").tag(CGFloat(0.5))
+                }
+                .pickerStyle(SegmentedPickerStyle())
+            }
+
+            HStack(spacing: 16) {
             Button(action: {
                 checkCameraPermission { granted in
                     if granted {
@@ -343,6 +411,32 @@ struct ScreenshotCaptureView: View {
                 .cornerRadius(12)
                 .shadow(color: .green.opacity(0.3), radius: 8)
             }
+            }
+
+            let fiveMB = 5 * 1024 * 1024
+            if let size = compressionPreviewSize {
+                if size < 0 {
+                    Text("Selected image resolution is too low for OCR")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                } else if size == -2 {
+                    Text("Unable to compress image for preview")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Final compressed size: \(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))")
+                            .font(.caption2)
+                            .foregroundColor(.white.opacity(0.8))
+
+                        if size > fiveMB {
+                            Text("Warning: Couldn't compress image below 5 MB")
+                                .font(.caption)
+                                .foregroundColor(.red)
+                        }
+                    }
+                }
+            }
         }
     }
     
@@ -402,7 +496,7 @@ struct ScreenshotCaptureView: View {
     private var submitButtonView: some View {
         VStack(spacing: 16) {
             Button(action: {
-                Task {
+                uploadTask = Task {
                     await submitScreenshot()
                 }
             }) {
@@ -452,10 +546,23 @@ struct ScreenshotCaptureView: View {
             // Processing Progress
             if isLoading && ocrService.isProcessing {
                 VStack(spacing: 8) {
-                    ProgressView(value: ocrService.processingProgress)
-                        .progressViewStyle(LinearProgressViewStyle(tint: .blue))
-                        .scaleEffect(x: 1, y: 2)
-                    
+                    UploadProgressView(progress: .constant(ocrService.processingProgress), speedText: nil, estimatedTimeRemaining: nil, fileSizeText: nil, onCancel: {
+                        // Cancel both the local Task and the OCR service's active work
+                        uploadTask?.cancel()
+                        ocrService.cancelActiveWork()
+                        uploadTask = nil
+                        isLoading = false
+                        showRetryAvailable = false
+
+                        // Show a non-modal toast indicating cancellation
+                        Task { @MainActor in
+                            toastMessage = "Upload canceled"
+                            showToast = true
+                            try? await Task.sleep(nanoseconds: 2_000_000_000)
+                            showToast = false
+                        }
+                    })
+
                     Text("Processing screenshot... \(String(format: "%.0f", ocrService.processingProgress * 100))%")
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.7))
@@ -548,6 +655,7 @@ struct ScreenshotCaptureView: View {
         }
     }
     
+    @MainActor
     private func submitScreenshot() async {
         guard let image = capturedImage else { return }
         guard let userId = AuthService.shared.currentUser?.id else {
@@ -572,17 +680,31 @@ struct ScreenshotCaptureView: View {
             
         } catch {
             showError = true
+            // Surface OCR-specific errors first
             if let ocrError = error as? OCRError {
+                showRetryAvailable = false
                 errorMessage = ocrError.localizedDescription
                 if let suggestion = ocrError.recoverySuggestion {
                     errorMessage += "\n\n\(suggestion)"
                 }
+            } else if let storageError = error as? StorageError {
+                // Offer a retry when uploads time out
+                switch storageError {
+                case .uploadTimeout:
+                    showRetryAvailable = true
+                    errorMessage = "Upload timed out. Please check your connection and try again. Tap Retry to resubmit."
+                default:
+                    showRetryAvailable = false
+                    errorMessage = storageError.localizedDescription
+                }
             } else {
+                showRetryAvailable = false
                 errorMessage = "Failed to submit screenshot: \(error.localizedDescription)"
             }
         }
-        
+
         isLoading = false
+        uploadTask = nil
     }
     
     private func gameIcon(for gameType: String) -> String {

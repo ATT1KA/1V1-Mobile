@@ -2,7 +2,7 @@ import SwiftUI
 
 struct EventCheckInView: View {
     let event: Event
-    
+
     @StateObject private var eventService = EventService.shared
     @StateObject private var nfcService = NFCService()
     @ObservedObject private var qrService = QRCodeService.shared
@@ -21,30 +21,32 @@ struct EventCheckInView: View {
     
     var body: some View {
         // Guard UI with events feature toggle
-        if !preferences.eventsEnabled {
-            VStack(spacing: 12) {
-                Text("Event features are disabled. Enable them in your Profile to use check-ins and matchmaking.")
-                    .multilineTextAlignment(.center)
-                    .padding()
-                NavigationLink(destination: ProfileView()) {
-                    Text("Open Profile")
+        Group {
+            if !preferences.eventsEnabled {
+                VStack(spacing: 12) {
+                    Text("Event features are disabled. Enable them in your Profile to use check-ins and matchmaking.")
+                        .multilineTextAlignment(.center)
+                        .padding()
+                    NavigationLink(destination: ProfileView()) {
+                        Text("Open Profile")
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 16) {
+                    header
+                    stats
+                    buttons
+                    if let image = qrService.generatedQRImage {
+                        Image(uiImage: image)
+                            .resizable()
+                            .interpolation(.none)
+                            .scaledToFit()
+                            .frame(maxWidth: 240)
+                            .padding(.top, 8)
+                    }
+                    Spacer()
                 }
             }
-            .navigationTitle("Check In")
-        } else {
-            VStack(alignment: .leading, spacing: 16) {
-            header
-            stats
-            buttons
-            if let image = qrService.generatedQRImage {
-                Image(uiImage: image)
-                    .resizable()
-                    .interpolation(.none)
-                    .scaledToFit()
-                    .frame(maxWidth: 240)
-                    .padding(.top, 8)
-            }
-            Spacer()
         }
         .padding()
         .navigationTitle("Check In")

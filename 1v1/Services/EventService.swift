@@ -179,7 +179,7 @@ class EventService: ObservableObject {
             return false
         }
         
-        guard let _ = AuthService.shared.currentUser?.id else {
+        guard let _ = await AuthService.shared.currentUser?.id else {
             await MainActor.run { self.errorMessage = "User not authenticated" }
             return false
         }
@@ -226,8 +226,9 @@ class EventService: ObservableObject {
                 await MainActor.run { self.errorMessage = result.message }
                 return false
             }
-            // Fallback: attempt to parse single object
-            if let result: RPCResult = try? resp.value {
+            // Fallback: attempt to parse single object from raw data
+            if let singleResult = try? SupabaseService.jsonDecoder.decode(RPCResult.self, from: resp.data) {
+                let result = singleResult
                 if result.ok {
                     // Invalidate local cache and force a refresh from server so counts are authoritative
                     attendeeCountCache[eventId] = nil
@@ -252,8 +253,24 @@ class EventService: ObservableObject {
     }
     
     // MARK: - Helpers
-    private func extractDatabaseErrorCode(from httpError: PostgrestHTTPError) -> String? {
-        guard let json = try? JSONSerialization.jsonObject(with: httpError.data) as? [String: Any] else { return nil }
+    private func extractDatabaseErrorCode(from httpError: Error) -> String? {
+        // Attempt to extract raw Data payload from common error containers (NSError userInfo or description JSON)
+        var payloadData: Data?
+        if let ns = httpError as NSError?, let d = ns.userInfo["data"] as? Data {
+            payloadData = d
+        }
+        if payloadData == nil {
+            // Try to parse the error description as JSON if it contains a JSON string
+            let description = String(describing: httpError)
+            if let d = description.data(using: .utf8) {
+                payloadData = d
+            }
+        }
+
+        guard let data = payloadData,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+
         // PostgREST error format may include details.code or code
         if let code = json["code"] as? String { return code }
         if let details = json["details"] as? [String: Any], let code = details["code"] as? String { return code }
