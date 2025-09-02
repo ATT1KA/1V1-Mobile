@@ -18,6 +18,11 @@ class NotificationService: ObservableObject {
     private var matchMonitoringTasks: [String: Task<Void, Never>] = [:]
     private var verificationReminderTasks: [String: Task<Void, Never>] = [:]
     private var notificationDeliveryQueue: [PendingNotification] = []
+    // Flag to indicate intentional unsubscribe to avoid duplicate resubscribe attempts
+    private var intentionallyUnsubscribed: Bool = false
+    // Short-lived dedupe map for update events to avoid double-firing between parallel handlers
+    private var updateDedupeTimestamps: [String: Date] = [:]
+    private let updateDedupeInterval: TimeInterval = 2.0 // seconds
     // Resubscribe/backoff state for realtime channels
     private var realtimeResubscribeDelay: TimeInterval = 1.0
     private let realtimeResubscribeMaxDelay: TimeInterval = 32.0
@@ -37,6 +42,10 @@ class NotificationService: ObservableObject {
     
     // MARK: - Resource Management
     private func cleanupResources() {
+        // Mark that we're intentionally unsubscribing to prevent the channel .closed handler
+        // from attempting to resubscribe during an explicit cleanup (e.g., on sign-out).
+        intentionallyUnsubscribed = true
+
         // Unsubscribe from any active realtime channels
         for (key, channel) in realtimeSubscriptions {
             print("ℹ️ Unsubscribing realtime channel: \(key)")
@@ -45,12 +54,17 @@ class NotificationService: ObservableObject {
         realtimeSubscriptions.removeAll()
         matchEndTimers.values.forEach { $0.invalidate() }
         matchMonitoringTasks.values.forEach { $0.cancel() }
+
+        // Cancel any pending verification reminder tasks (prevents reminders firing post sign-out)
+        verificationReminderTasks.values.forEach { $0.cancel() }
+        verificationReminderTasks.removeAll()
     }
 
     private func authStateChanged(user: User?) async {
         if user != nil {
-            // Ensure we start fresh
-            cleanupResources()
+            // Ensure we start fresh. Reset intentional unsubscribe so new sessions can resubscribe.
+            // Do NOT call cleanupResources here since it marks intentionallyUnsubscribed = true.
+            intentionallyUnsubscribed = false
             setupRealtimeSubscriptions()
         } else {
             // Unsubscribe/cleanup on sign-out
@@ -104,6 +118,18 @@ class NotificationService: ObservableObject {
             return
         }
 
+        // If an existing duels channel exists (from a previous subscribe attempt), clear it
+        // to avoid overlapping channels when resubscribing.
+        if let existing = realtimeSubscriptions["duels"] {
+            print("ℹ️ Clearing existing duels channel before (re)subscribing")
+            existing.unsubscribe()
+            realtimeSubscriptions.removeValue(forKey: "duels")
+        }
+
+        // We're explicitly (re)subscribing now; clear the intentional unsubscribe flag so
+        // the .closed handler knows resubscribe attempts are allowed.
+        intentionallyUnsubscribed = false
+
         let channel = client.realtime.channel("realtime:public:duels")
 
         // Register two filtered handlers (one per player column) using inline postgresChange closures.
@@ -128,12 +154,7 @@ class NotificationService: ObservableObject {
                 guard let self = self else { return }
                 guard let raw = payload.record else { return }
                 guard let record = Self.coerceRecord(raw) else { return }
-
-                guard let challengerId = record["challenger_id"] as? String,
-                      let opponentId = record["opponent_id"] as? String,
-                      [challengerId, opponentId].contains(currentUserId) else { return }
-
-                await self.handleDuelUpdate(["new": record])
+                await self.processUpdateRecord(record: record, oldRaw: payload.oldRecord)
             }
         }
 
@@ -158,12 +179,7 @@ class NotificationService: ObservableObject {
                 guard let self = self else { return }
                 guard let raw = payload.record else { return }
                 guard let record = Self.coerceRecord(raw) else { return }
-
-                guard let challengerId = record["challenger_id"] as? String,
-                      let opponentId = record["opponent_id"] as? String,
-                      [challengerId, opponentId].contains(currentUserId) else { return }
-
-                await self.handleDuelUpdate(["new": record])
+                await self.processUpdateRecord(record: record, oldRaw: payload.oldRecord)
             }
         }
 
@@ -172,14 +188,46 @@ class NotificationService: ObservableObject {
             print("❌ Duels channel error: \(info)")
         }
 
+        // Reset backoff only when we receive a confirmed subscribed/join event on the channel —
+        // this avoids resetting the delay prematurely when subscribe() is called but
+        // the connection fails. Use `.subscribed` (join confirmation) if available.
+        channel.on(.subscribed) { [weak self] _ in
+            Task { @MainActor in
+                guard let self = self else { return }
+                print("✅ Duels channel subscribed; resetting resubscribe backoff")
+                self.realtimeResubscribeDelay = 1.0
+            }
+        }
+
         channel.on(.closed) { [weak self] _ in
             Task { @MainActor in
                 guard let self = self else { return }
+
+                // If we intentionally unsubscribed (cleanupResources), don't attempt to resubscribe.
+                if self.intentionallyUnsubscribed {
+                    print("ℹ️ Duels channel closed intentionally; skipping resubscribe")
+                    return
+                }
+
                 print("⚠️ Duels channel closed; attempting resubscribe… (delay: \(self.realtimeResubscribeDelay)s)")
+                // Clear any lingering channel reference to avoid overlapping channels
+                if let existing = self.realtimeSubscriptions["duels"] {
+                    print("ℹ️ Clearing lingering duels channel before resubscribe")
+                    existing.unsubscribe()
+                    self.realtimeSubscriptions.removeValue(forKey: "duels")
+                }
                 // Wait with simple exponential backoff, then try to re-setup subscriptions
                 let delayNs = UInt64(self.realtimeResubscribeDelay * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: delayNs)
+
+                // Only attempt resubscribe if a user is still signed in
+                guard AuthService.shared.currentUser != nil else {
+                    print("ℹ️ No signed-in user after channel closed; skipping resubscribe")
+                    return
+                }
+
                 self.setupRealtimeSubscriptions()
+
                 // Increase backoff for subsequent attempts, capped
                 self.realtimeResubscribeDelay = min(self.realtimeResubscribeDelay * 2, self.realtimeResubscribeMaxDelay)
             }
@@ -187,23 +235,42 @@ class NotificationService: ObservableObject {
 
         channel.subscribe()
         realtimeSubscriptions["duels"] = channel
-        // Reset backoff when (re)subscribed successfully
-        realtimeResubscribeDelay = 1.0
 
         print("✅ Realtime subscriptions for duels (user-filtered) initialized for user: \(currentUserId)")
     }
     
-    private func handleDuelUpdate(_ payload: [String: Any]) async {
-        guard let record = payload["new"] as? [String: Any],
-              let duelId = record["id"] as? String,
-              let status = record["status"] as? String else { 
-            print("⚠️ Invalid duel update payload")
-            return 
+    // Centralized processing for update payloads to avoid duplicated logic across parallel handlers
+    private func processUpdateRecord(record: [String: Any], oldRaw: Any?) async {
+        guard let currentUserId = AuthService.shared.currentUser?.id else { return }
+        // Basic players check
+        guard let challengerId = record["challenger_id"] as? String,
+              let opponentId = record["opponent_id"] as? String,
+              [challengerId, opponentId].contains(currentUserId) else { return }
+
+        // Ensure status exists and is one we care about; fallback when oldRecord is absent
+        guard let status = record["status"] as? String,
+              ["in_progress", "ended", "completed"].contains(status) else { return }
+
+        // Note: dedupe removed — rely on old-vs-new status equality check below
+
+        // If an old record is available, compare statuses and ignore updates where status didn't change
+        if let rawOld = oldRaw,
+           let oldRecord = Self.coerceRecord(rawOld),
+           let oldStatus = oldRecord["status"] as? String,
+           let newStatus = record["status"] as? String,
+           oldStatus == newStatus {
+            print("ℹ️ Duel status unchanged for duel \(record["id"] as? String ?? "unknown"); ignoring")
+            return
         }
-        
-        print("🔄 Duel update received: \(duelId) - Status: \(status)")
-        
-        switch status {
+
+        await self.handleDuelUpdate(["new": record])
+    }
+
+    // Extracted central status-change processor to reduce branching duplication
+    private func processDuelStatusChange(duelId: String, newStatus: String, record: [String: Any]) async {
+        print("🔄 Duel update received: \(duelId) - Status: \(newStatus)")
+
+        switch newStatus {
         case "in_progress":
             // If we're already monitoring this duel, ignore duplicate in_progress updates
             if let state = activeMatchNotifications[duelId], state.status == .inProgress {
@@ -218,6 +285,21 @@ class NotificationService: ObservableObject {
                 print("ℹ️ Duplicate ended for duel \(duelId); ignoring")
                 return
             }
+
+            // Ensure minimal state exists for fast status transitions that may have skipped in_progress
+            if activeMatchNotifications[duelId] == nil {
+                let gameType = record["game_type"] as? String ?? "unknown"
+                activeMatchNotifications[duelId] = MatchNotificationState(
+                    duelId: duelId,
+                    gameType: gameType,
+                    status: .ended,
+                    startTime: Date(),
+                    endTime: Date(),
+                    lastPingTime: nil,
+                    pingCount: 0
+                )
+            }
+
             await handleMatchEnded(duelId: duelId, record: record)
 
         case "completed":
@@ -228,9 +310,25 @@ class NotificationService: ObservableObject {
             }
             await stopMatchMonitoring(duelId: duelId)
 
+            // Notify the signed-in user that the match completed
+            if let me = AuthService.shared.currentUser?.id {
+                await sendMatchCompletedNotification(to: me, duelId: duelId)
+            }
+
         default:
-            print("ℹ️ Unhandled duel status: \(status)")
+            print("ℹ️ Unhandled duel status: \(newStatus)")
         }
+    }
+
+    private func handleDuelUpdate(_ payload: [String: Any]) async {
+        guard let record = payload["new"] as? [String: Any],
+              let duelId = record["id"] as? String,
+              let status = record["status"] as? String else {
+            print("⚠️ Invalid duel update payload")
+            return
+        }
+
+        await processDuelStatusChange(duelId: duelId, newStatus: status, record: record)
     }
     
     private func handleDuelInsert(_ payload: [String: Any]) async {
@@ -473,15 +571,30 @@ class NotificationService: ObservableObject {
     }
     
     private func deliverNotification(_ notification: PendingNotification) async {
-        // Save to database for cross-device sync
-        do {
-            try await supabaseService.insert(into: "notifications", values: notification)
-            print("✅ Notification saved to database: \(notification.id)")
-        } catch {
-            print("❌ Error saving notification: \(error)")
-            // Re-queue for retry
-            notificationDeliveryQueue.append(notification)
-            return
+        // Decide whether to persist remotely. Policy:
+        // - If `persistRemotely` is explicitly set, obey it.
+        // - If `persistRemotely` is nil, persist only when the notification is not targeted
+        //   at the signed-in user on this device (i.e., cross-device sync only).
+        let shouldPersistRemotely: Bool
+        if let explicit = notification.persistRemotely {
+            shouldPersistRemotely = explicit
+        } else {
+            shouldPersistRemotely = notification.userId != AuthService.shared.currentUser?.id
+        }
+
+        if shouldPersistRemotely {
+            // Save to database for cross-device sync
+            do {
+                try await supabaseService.insert(into: "notifications", values: notification)
+                print("✅ Notification saved to database: \(notification.id)")
+            } catch {
+                print("❌ Error saving notification: \(error)")
+                // Re-queue for retry
+                notificationDeliveryQueue.append(notification)
+                return
+            }
+        } else {
+            print("ℹ️ Skipping remote persistence for device-local notification: \(notification.id)")
         }
         
         // Send local push notification
@@ -696,6 +809,26 @@ class NotificationService: ObservableObject {
         
         await queueNotification(reminderNotification)
     }
+
+    func sendMatchCompletedNotification(
+        to userId: String,
+        duelId: String
+    ) async {
+        let notification = PendingNotification(
+            userId: userId,
+            type: .matchEnded,
+            title: "✅ Match Completed!",
+            body: "The match has completed. View the results in the app.",
+            data: NotificationData(
+                duelId: duelId,
+                action: "view_results"
+            ),
+            expiresAt: Date().addingTimeInterval(24 * 60 * 60),
+            priority: 1
+        )
+
+        await queueNotification(notification)
+    }
     
     func sendVerificationReminder(
         duelId: String
@@ -711,7 +844,16 @@ class NotificationService: ObservableObject {
                 .execute()
                 .value
             guard let duel = duels.first else { return }
-            // Send reminder to both players
+
+            // Only a single participant device should persist (publish) the reminders to avoid duplicates.
+            // Choose a deterministic publisher by taking the lexicographically smaller user id.
+            let publisherId = min(duel.challengerId, duel.opponentId)
+            guard AuthService.shared.currentUser?.id == publisherId else {
+                // Another device will publish the reminders; skip on this device.
+                return
+            }
+
+            // Publisher persists reminders for both players
             await sendVerificationReminderNotification(to: duel.challengerId, duelId: duelId)
             await sendVerificationReminderNotification(to: duel.opponentId, duelId: duelId)
             
@@ -933,12 +1075,57 @@ class NotificationService: ObservableObject {
 
     // Helper to coerce various payload record shapes into [String: Any]
     private static func coerceRecord(_ raw: Any?) -> [String: Any]? {
+        // Recursive helper to convert AnyJSON / nested containers into Foundation types
+        func convertValue(_ value: Any) -> Any {
+            // Unwrap AnyJSON wrappers
+            if let anyJson = value as? AnyJSON {
+                return convertValue(anyJson.rawValue)
+            }
+
+            // Dictionary with AnyJSON values
+            if let dictAnyJSON = value as? [String: AnyJSON] {
+                var out: [String: Any] = [:]
+                for (k, v) in dictAnyJSON {
+                    out[k] = convertValue(v)
+                }
+                return out
+            }
+
+            // Dictionary with Any values (may contain nested AnyJSON)
+            if let dictAny = value as? [String: Any] {
+                var out: [String: Any] = [:]
+                for (k, v) in dictAny {
+                    out[k] = convertValue(v)
+                }
+                return out
+            }
+
+            // Array of AnyJSON
+            if let arrAnyJSON = value as? [AnyJSON] {
+                return arrAnyJSON.map { convertValue($0) }
+            }
+
+            // Array of Any (may contain nested AnyJSON)
+            if let arrAny = value as? [Any] {
+                return arrAny.map { convertValue($0) }
+            }
+
+            // Fallback: return the value as-is
+            return value
+        }
+
         if let r = raw as? [String: Any] {
             return r
         }
+
         if let r = raw as? [String: AnyJSON] {
-            return r.mapValues { $0.rawValue }
+            var out: [String: Any] = [:]
+            for (k, v) in r {
+                out[k] = convertValue(v)
+            }
+            return out
         }
+
         return nil
     }
 }

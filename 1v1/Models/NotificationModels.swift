@@ -13,6 +13,9 @@ struct PendingNotification: Codable, Identifiable {
     let isRead: Bool
     let deliveredAt: Date?
     let priority: Int
+    // Optional flag to indicate whether this notification should be persisted remotely
+    // nil => automatic behavior (persist for non-local notifications)
+    let persistRemotely: Bool?
     
     enum CodingKeys: String, CodingKey {
         case id
@@ -26,6 +29,7 @@ struct PendingNotification: Codable, Identifiable {
         case isRead = "is_read"
         case deliveredAt = "delivered_at"
         case priority
+        case persistRemotely = "persist_remotely"
     }
     
     init(
@@ -40,6 +44,7 @@ struct PendingNotification: Codable, Identifiable {
         isRead: Bool = false,
         deliveredAt: Date? = nil,
         priority: Int = 5
+    ,        persistRemotely: Bool? = nil
     ) {
         self.id = id
         self.userId = userId
@@ -52,6 +57,7 @@ struct PendingNotification: Codable, Identifiable {
         self.isRead = isRead
         self.deliveredAt = deliveredAt
         self.priority = priority
+        self.persistRemotely = persistRemotely
     }
 }
 
