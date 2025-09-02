@@ -37,7 +37,9 @@ final class NotificationServiceTests: XCTestCase {
         await mockService.sendMatchStartedNotification(to: "test-user", duelId: "denied-1", gameType: "Test")
         await mockService.sendMatchEndedNotification(to: "test-user", duelId: "denied-1")
 
-        XCTAssertTrue(mockService.queuedNotifications.contains { $0.contains("match-start:denied-1") })
+        // When authorization is denied, no notifications should be queued
+        XCTAssertFalse(mockService.queuedNotifications.contains { $0.contains("match-start:denied-1") })
+        XCTAssertEqual(mockService.queuedNotifications.count, 0)
     }
 
     func testRevokedPermissionsBlockAfterGrant() async throws {

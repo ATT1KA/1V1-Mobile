@@ -2,7 +2,7 @@ import XCTest
 @testable import OneVOneMobile
 
 // Minimal mock Supabase provider for tests
-final class MockSupabaseService: SupabaseProviding {
+final class MockSupabaseService: SupabaseServicing {
     private(set) var inserted: [(table: String, json: Data)] = []
 
     func getClient() -> SupabaseClient? { return nil }
@@ -10,6 +10,29 @@ final class MockSupabaseService: SupabaseProviding {
     func insert<T: Codable>(into table: String, values: T) async throws {
         let data = try JSONEncoder().encode(values)
         inserted.append((table: table, json: data))
+    }
+
+    func subscribeToDuels(
+        for userId: String,
+        onInsert: @escaping ([String: Any]) -> Void,
+        onUpdate: @escaping (_ payload: [String: Any], _ oldRecord: Any?) -> Void,
+        onSubscribed: @escaping () -> Void,
+        onClosed: @escaping () -> Void
+    ) -> String {
+        // No-op subscription for tests; return a placeholder id
+        return UUID().uuidString
+    }
+
+    func unsubscribe(subscriptionId: String) {
+        // No-op
+    }
+
+    func emitDuelInsert(record: [String: Any]) {
+        // No-op: tests using this mock do not rely on internal emission
+    }
+
+    func emitDuelUpdate(record: [String: Any], oldRecord: Any?) {
+        // No-op: tests using this mock do not rely on internal emission
     }
 }
 
@@ -199,6 +222,84 @@ final class NotificationIntegrationTests: XCTestCase {
         } else {
             XCTFail("Expected a persisted notification for remote user")
         }
+    }
+
+    func testSeparateAdaptersDoNotCrossDuplicateDeviceLocalNotifications() async throws {
+        // Arrange: single user, two devices (A and B) with separate Supabase adapters
+        let user = User(id: "multi-device", email: "multi@example.com")
+        AuthService.shared.currentUser = user
+
+        let adapterA = MockSupabaseAdapter()
+        let adapterB = MockSupabaseAdapter()
+
+        let serviceA = NotificationService(supabaseService: adapterA)
+        let serviceB = NotificationService(supabaseService: adapterB)
+
+        // Ensure both services can schedule local notifications
+        await serviceA.setAuthorizationStatus(true)
+        await serviceB.setAuthorizationStatus(true)
+
+        // Wire the mock adapters to forward events into their respective services
+        _ = adapterA.subscribeToDuels(
+            for: user.id,
+            onInsert: { record in
+                Task { @MainActor in await serviceA.receiveDuelPayload(["new": record]) }
+            },
+            onUpdate: { record, _ in
+                Task { @MainActor in await serviceA.receiveDuelPayload(["new": record]) }
+            },
+            onSubscribed: {},
+            onClosed: {}
+        )
+
+        _ = adapterB.subscribeToDuels(
+            for: user.id,
+            onInsert: { record in
+                Task { @MainActor in await serviceB.receiveDuelPayload(["new": record]) }
+            },
+            onUpdate: { record, _ in
+                Task { @MainActor in await serviceB.receiveDuelPayload(["new": record]) }
+            },
+            onSubscribed: {},
+            onClosed: {}
+        )
+
+        // Act: emit an insert + update on adapterA only
+        let duelId = "duel-multi-1"
+        let startRecord: [String: Any] = [
+            "id": duelId,
+            "status": "in_progress",
+            "game_type": "Integration",
+            "challenger_id": user.id,
+            "opponent_id": "opponent"
+        ]
+        adapterA.emitDuelInsert(record: startRecord)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(serviceA.activeMatchNotifications[duelId]?.status, .inProgress)
+        XCTAssertTrue(serviceA.pendingNotifications.contains { $0.type == .matchStarted && $0.data.duelId == duelId })
+
+        // Ensure service B saw no local scheduling for this event
+        XCTAssertNil(serviceB.activeMatchNotifications[duelId])
+        XCTAssertFalse(serviceB.pendingNotifications.contains { $0.type == .matchStarted && $0.data.duelId == duelId })
+
+        // Now emit an ended update on adapterA and ensure only A processes it
+        let endedRecord: [String: Any] = [
+            "id": duelId,
+            "status": "ended",
+            "game_type": "Integration",
+            "challenger_id": user.id,
+            "opponent_id": "opponent"
+        ]
+        adapterA.emitDuelUpdate(record: endedRecord, oldRecord: startRecord)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(serviceA.activeMatchNotifications[duelId]?.status, .ended)
+        XCTAssertTrue(serviceA.pendingNotifications.contains { $0.type == .matchEnded && $0.data.duelId == duelId })
+        XCTAssertTrue(serviceA.pendingNotifications.contains { $0.type == .verificationReminder && $0.data.duelId == duelId })
+
+        XCTAssertNil(serviceB.activeMatchNotifications[duelId])
+        XCTAssertFalse(serviceB.pendingNotifications.contains { $0.type == .matchEnded && $0.data.duelId == duelId })
     }
 }
 
