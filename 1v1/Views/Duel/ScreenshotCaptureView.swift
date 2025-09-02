@@ -17,6 +17,8 @@ struct ScreenshotCaptureView: View {
     @State private var isLoading = false
     @State private var showError = false
     @State private var errorMessage = ""
+    @State private var selectedQuality: CGFloat = 0.8
+    @State private var compressionPreviewSize: Int? = nil
     @State private var gameConfig: GameConfiguration?
     @State private var timeRemaining: TimeInterval = 180 // 3 minutes
     @State private var timer: Timer?
@@ -71,10 +73,18 @@ struct ScreenshotCaptureView: View {
             )
         }
         .sheet(isPresented: $showImagePicker) {
-            ImagePicker(selectedImage: $capturedImage, sourceType: .photoLibrary)
+            ImagePicker(selectedImage: $capturedImage, sourceType: .photoLibrary, quality: selectedQuality, onCompressionPreview: { size in
+                DispatchQueue.main.async {
+                    compressionPreviewSize = size
+                }
+            })
         }
         .sheet(isPresented: $showCamera) {
-            ImagePicker(selectedImage: $capturedImage, sourceType: .camera)
+            ImagePicker(selectedImage: $capturedImage, sourceType: .camera, quality: selectedQuality, onCompressionPreview: { size in
+                DispatchQueue.main.async {
+                    compressionPreviewSize = size
+                }
+            })
         }
         .alert("Error", isPresented: $showError) {
             Button("OK") { }
@@ -276,7 +286,22 @@ struct ScreenshotCaptureView: View {
     }
     
     private var captureOptionsView: some View {
-        HStack(spacing: 16) {
+        VStack(spacing: 12) {
+            // Quality selector
+            HStack(spacing: 12) {
+                Text("Quality")
+                    .font(.caption)
+                    .foregroundColor(.white)
+
+                Picker("Quality", selection: $selectedQuality) {
+                    Text("High").tag(CGFloat(0.9))
+                    Text("Medium").tag(CGFloat(0.7))
+                    Text("Low").tag(CGFloat(0.5))
+                }
+                .pickerStyle(SegmentedPickerStyle())
+            }
+
+            HStack(spacing: 16) {
             Button(action: {
                 checkCameraPermission { granted in
                     if granted {
@@ -342,6 +367,19 @@ struct ScreenshotCaptureView: View {
                 )
                 .cornerRadius(12)
                 .shadow(color: .green.opacity(0.3), radius: 8)
+            }
+            }
+
+            if let size = compressionPreviewSize {
+                if size < 0 {
+                    Text("Selected image resolution is too low for OCR")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                } else {
+                    Text("Estimated size at selected quality: \(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))")
+                        .font(.caption2)
+                        .foregroundColor(.white.opacity(0.8))
+                }
             }
         }
     }
@@ -452,10 +490,11 @@ struct ScreenshotCaptureView: View {
             // Processing Progress
             if isLoading && ocrService.isProcessing {
                 VStack(spacing: 8) {
-                    ProgressView(value: ocrService.processingProgress)
-                        .progressViewStyle(LinearProgressViewStyle(tint: .blue))
-                        .scaleEffect(x: 1, y: 2)
-                    
+                    UploadProgressView(progress: .constant(ocrService.processingProgress), speedText: nil, estimatedTimeRemaining: nil, fileSizeText: nil, onCancel: {
+                        // Cancellation not wired to backend upload yet; this will cancel local process
+                        // TODO: wire into upload cancellation
+                    })
+
                     Text("Processing screenshot... \(String(format: "%.0f", ocrService.processingProgress * 100))%")
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.7))

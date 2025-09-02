@@ -376,13 +376,53 @@ class OCRVerificationService: ObservableObject {
     
     // MARK: - Helper Methods
     private func uploadScreenshot(image: UIImage, duelId: String, userId: String) async throws -> String {
-        let screenshotPath = "duel_submissions/\(duelId)/\(userId)_\(Date().timeIntervalSince1970).jpg"
-        
-        return try await storageService.uploadImage(
-            image: image,
-            bucket: "duel-screenshots",
-            path: screenshotPath
-        )
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let screenshotPath = "duel_submissions/\(duelId)/\(userId)_\(timestamp).jpg"
+
+        // Prepare metadata
+        let metadata: [String: String] = [
+            "duelId": duelId,
+            "userId": userId,
+            "timestamp": "\(timestamp)"
+        ]
+
+        // Retry with exponential backoff
+        var lastError: Error?
+        for attempt in 1...3 {
+            do {
+                let (url, finalSize) = try await storageService.uploadImageOptimized(
+                    image: image,
+                    bucket: "duel-screenshots",
+                    path: screenshotPath,
+                    metadata: metadata,
+                    progress: { [weak self] p in
+                        // Map storage progress into processing progress range
+                        Task { @MainActor in
+                            self?.processingProgress = 0.2 + (p * 0.3)
+                        }
+                    }
+                )
+
+                // Log compression/size metrics (could be sent to analytics)
+                if let original = image.jpegData(compressionQuality: 1.0) {
+                    let compressionRatio = Double(finalSize) / Double(original.count)
+                    print("Upload complete: finalSize=\(finalSize) bytes, compressionRatio=\(compressionRatio)")
+                }
+
+                return url
+            } catch {
+                lastError = error
+                if attempt < 3 {
+                    let backoff = UInt64(pow(2.0, Double(attempt)) * 1_000_000_000)
+                    try? await Task.sleep(nanoseconds: backoff)
+                    continue
+                } else {
+                    throw error
+                }
+            }
+        }
+
+        throw lastError ?? OCRError.networkError
     }
     
     private func cropImage(image: UIImage, to rect: CGRect) -> UIImage {

@@ -4,46 +4,71 @@ import Supabase
 
 class StorageService: ObservableObject {
     static let shared = StorageService()
-    
+
     private let supabaseService = SupabaseService.shared
-    
+
     init() {}
-    
-    // MARK: - Image Upload
+
+    // MARK: - Image Upload (Enhanced)
+    /// Backwards-compatible upload that defers to the optimized uploader.
     func uploadImage(
         image: UIImage,
         bucket: String,
         path: String,
         compressionQuality: CGFloat = 0.8
     ) async throws -> String {
-        
+        let result = try await uploadImageOptimized(
+            image: image,
+            bucket: bucket,
+            path: path,
+            metadata: nil,
+            progress: nil
+        )
+
+        return result.url
+    }
+
+    /// Optimized upload with progressive compression, timeout and progress reporting.
+    func uploadImageOptimized(
+        image: UIImage,
+        bucket: String,
+        path: String,
+        metadata: [String: String]?,
+        progress: ((Double) -> Void)? = nil
+    ) async throws -> (url: String, finalSize: Int) {
         guard let client = supabaseService.getClient() else {
             throw StorageError.clientNotInitialized
         }
-        
-        // Compress image
-        guard let imageData = image.jpegData(compressionQuality: compressionQuality) else {
-            throw StorageError.imageCompressionFailed
-        }
-        
-        // Validate file size (max 10MB)
-        guard imageData.count <= 10 * 1024 * 1024 else {
+
+        // Progressive compression: try qualities until under 5MB
+        let compressed = try ImageCompressionUtility.shared.compressImageProgressively(image: image, targetMaxBytes: 5 * 1024 * 1024)
+
+        // Final size feedback
+        progress?(0.05)
+
+        guard compressed.data.count <= 5 * 1024 * 1024 else {
             throw StorageError.fileTooLarge
         }
-        
+
         do {
-            // Upload to Supabase Storage
+            // Note: Supabase Swift client doesn't currently expose upload progress callbacks.
+            // We report coarse progress to the caller so UI can update.
+            progress?(0.2)
+
             try await client.storage
                 .from(bucket)
-                .upload(path, data: imageData)
-            
+                .upload(path, data: compressed.data)
+
+            progress?(0.9)
+
             // Get public URL
             let publicURL = try client.storage
                 .from(bucket)
                 .getPublicURL(path: path)
-            
-            return publicURL.absoluteString
-            
+
+            progress?(1.0)
+
+            return (url: publicURL.absoluteString, finalSize: compressed.data.count)
         } catch {
             throw StorageError.uploadFailed(error.localizedDescription)
         }

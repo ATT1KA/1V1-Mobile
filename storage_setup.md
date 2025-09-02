@@ -80,6 +80,31 @@ CREATE POLICY "Users can delete their own documents" ON storage.objects
     FOR DELETE USING (bucket_id = 'documents' AND auth.uid()::text = (storage.foldername(name))[1]);
 ```
 
+## Duel Screenshots Bucket
+
+**Bucket Name**: `duel-screenshots`
+**Public**: ❌ No (recommended)
+**File Size Limit**: `5MB`
+**Allowed MIME Types**: `image/jpeg, image/png`
+
+**Description**: This bucket stores user-submitted scoreboard screenshots for OCR verification. It should enforce user-scoped access and file size/type validation.
+
+Add the following RLS policies to enforce access control and validation:
+
+```sql
+-- Duel screenshots are private but readable by server-side functions
+CREATE POLICY "Duel screenshots user scoped access" ON storage.objects
+    FOR INSERT WITH CHECK (bucket_id = 'duel-screenshots' AND auth.uid()::text = (storage.foldername(name))[1]);
+
+CREATE POLICY "Users can delete their own duel screenshots" ON storage.objects
+    FOR DELETE USING (bucket_id = 'duel-screenshots' AND auth.uid()::text = (storage.foldername(name))[1]);
+
+-- Optional: validate file size and mime-type using server-side checks in your upload function or Edge Function
+-- Example validation should be enforced before calling Supabase Storage upload
+```
+
+Also consider adding a scheduled cleanup job (TTL) to remove expired duel screenshots after a retention period.
+
 ## 6. Test Storage Setup
 
 You can test the storage setup by:
