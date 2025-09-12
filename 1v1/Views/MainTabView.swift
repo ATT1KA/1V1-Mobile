@@ -25,13 +25,20 @@ struct MainTabView: View {
                 .badge(duelService.pendingDuels.count > 0 ? "\(duelService.pendingDuels.count)" : nil)
                 .tag(1)
 
+            LeaderboardView()
+                .tabItem {
+                    Image(systemName: "trophy.fill")
+                    Text("Leaderboard")
+                }
+                .tag(2)
+
             if preferences.eventsEnabled {
                 EventListView()
                     .tabItem {
                         Image(systemName: "calendar")
                         Text("Events")
                     }
-                    .tag(2)
+                    .tag(3)
             }
             
             ProfileView()
@@ -40,7 +47,7 @@ struct MainTabView: View {
                     Text("Profile")
                 }
                 .badge(unreadNotificationCount > 0 ? "\(unreadNotificationCount)" : nil)
-                .tag(preferences.eventsEnabled ? 3 : 2)
+                .tag(preferences.eventsEnabled ? 4 : 3)
         }
         .onAppear {
             loadNotificationCount()

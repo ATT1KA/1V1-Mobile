@@ -86,6 +86,34 @@ struct Constants {
         static let minScore = 0
     }
 
+    // MARK: - Gamification: Points & Leaderboard
+    struct Points {
+        static let duelWinBase: Int = 100
+        static let duelWinScoreMultiplier: Double = 2.0
+        static let duelLossBase: Int = 25
+        static let profileSharePoints: Int = 10
+        static let achievementUnlockPoints: Int = 50
+        static let dailyShareLimit: Int = 5
+    }
+
+    struct Leaderboard {
+        static let defaultPageSize: Int = 50
+        static let maxPageSize: Int = 100
+        static let refreshInterval: TimeInterval = 30.0
+        static let anonymousPlayerPrefix: String = "Player"
+    }
+
+    struct Redemption {
+        static let minRedemptionAmount: Int = 50
+        static let maxRedemptionAmount: Int = 10000
+        static let confirmationThreshold: Int = 500
+    }
+
+    struct AntiAbuse {
+        static let dailyPointsCap: Int = 2000
+        static let shareCooldownSeconds: TimeInterval = 60
+    }
+
     // MARK: - Verification
     struct VerificationWindow {
         /// Number of seconds allowed to submit verification after a match ends

@@ -14,6 +14,8 @@ class OnlineSharingService: ObservableObject {
     // Memory management
     private var activePresentations: Set<UUID> = []
     private var presentationTasks: [UUID: Task<Void, Never>] = [:]
+    // In-memory cache to prevent rapid repeated awarding of share points per user
+    private var lastShareTimestamps: [String: Date] = [:]
     
     private init() {}
     
@@ -378,8 +380,38 @@ class OnlineSharingService: ObservableObject {
         )
         
         do {
-            try await supabaseService.insert(into: "profile_shares", values: shareEvent)
+            guard let client = supabaseService.getClient() else {
+                print("❌ Supabase client not initialized for share logging")
+                return
+            }
+
+            // Insert and return created row to obtain id for idempotency
+            let insertResult = try await client.from("profile_shares").insert(shareEvent).select().execute()
             print("✅ Share event logged for \(platform.displayName)")
+
+            // Determine share id from returned row if available
+            var shareId = UUID().uuidString
+            if let rows = insertResult.value as? [[String: Any]], let first = rows.first, let id = first["id"] as? String {
+                shareId = id
+            }
+
+            // Award share points (best-effort) but enforce client-side cooldown to avoid rapid repeats
+            Task {
+                // Check client-side cooldown
+                if let last = self.lastShareTimestamps[profile.userId], Date().timeIntervalSince(last) < Constants.AntiAbuse.shareCooldownSeconds {
+                    print("⏱ Share cooldown active; skipping award for user \(profile.userId)")
+                    return
+                }
+
+                // Record attempt and call award RPC
+                self.lastShareTimestamps[profile.userId] = Date()
+                do {
+                    try await PointsService.shared.awardSharePoints(userId: profile.userId, shareId: shareId, shareMethod: platform.rawValue)
+                    print("✅ Awarded share points for user \(profile.userId)")
+                } catch {
+                    print("❌ Failed to award share points: \(error)")
+                }
+            }
         } catch {
             print("❌ Failed to log share event: \(error)")
         }

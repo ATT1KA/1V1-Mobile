@@ -603,7 +603,7 @@ class DuelService: ObservableObject {
             gameType: duel.gameType,
             score: duel.challengerId == winnerId ? duel.challengerScore : duel.opponentScore
         )
-        
+
         // Update loser stats
         try await updateUserStats(
             userId: loserId,
@@ -611,6 +611,16 @@ class DuelService: ObservableObject {
             gameType: duel.gameType,
             score: duel.challengerId == loserId ? duel.challengerScore : duel.opponentScore
         )
+
+        // Award points for duel completion (best-effort; do not fail the stats update)
+        do {
+            let winnerScore = duel.challengerId == winnerId ? duel.challengerScore : duel.opponentScore
+            let loserScore = duel.challengerId == loserId ? duel.challengerScore : duel.opponentScore
+            try await PointsService.shared.awardDuelPoints(userId: winnerId, duelId: duelId, isWin: true, score: winnerScore ?? 0)
+            try await PointsService.shared.awardDuelPoints(userId: loserId, duelId: duelId, isWin: false, score: loserScore ?? 0)
+        } catch {
+            print("Failed to award points for duel \(duelId): \(error)")
+        }
     }
     
     private func updateUserStats(userId: String, isWin: Bool, gameType: String, score: Int?) async throws {
