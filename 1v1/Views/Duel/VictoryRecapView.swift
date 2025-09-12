@@ -575,11 +575,14 @@ struct VictoryRecapView: View {
 
         await MainActor.run {
             let activityVC = UIActivityViewController(activityItems: items, applicationActivities: nil)
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let window = windowScene.windows.first,
-               let rootVC = window.rootViewController {
-                rootVC.present(activityVC, animated: true)
+            if let pop = activityVC.popoverPresentationController,
+               let window = UIApplication.shared.windows.first(where: { $0.isKeyWindow }) {
+                pop.sourceView = window
+                pop.sourceRect = CGRect(x: window.bounds.midX, y: window.bounds.maxY - 1, width: 1, height: 1)
+                pop.permittedArrowDirections = []
             }
+            let keyWindow = UIApplication.shared.windows.first { $0.isKeyWindow }
+            keyWindow?.rootViewController?.present(activityVC, animated: true)
         }
 
         // Analytics hook
@@ -830,7 +833,8 @@ struct VictoryConfettiView: View {
     private func createConfetti() {
         let colors: [Color] = [.yellow, .orange, .red, .purple, .blue, .green]
         
-        for i in 0..<50 {
+        let count = ProcessInfo.processInfo.isLowPowerModeEnabled ? 20 : 50
+        for i in 0..<count {
             let item = ConfettiItem(
                 id: i,
                 x: CGFloat.random(in: 0...UIScreen.main.bounds.width),

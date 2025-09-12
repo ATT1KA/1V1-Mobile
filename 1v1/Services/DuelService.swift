@@ -613,6 +613,7 @@ class DuelService: ObservableObject {
 
         // Call atomic RPC
         let rpcParams: [String: Any] = [
+            "p_duel_id": duelId,
             "p_winner_id": winnerId,
             "p_loser_id": loserId,
             "p_winner_score": winnerScore,
@@ -645,9 +646,9 @@ class DuelService: ObservableObject {
 
         // Load usernames for recap
         guard let client = supabaseService.getClient() else { throw DuelError.duelNotFound }
-        let users: [User] = try await client
+        let users: [LightProfile] = try await client
             .from("profiles")
-            .select()
+            .select("id,username")
             .in("id", values: [winnerId, loserId])
             .execute()
             .value
@@ -690,6 +691,7 @@ class DuelService: ObservableObject {
         latestVictoryRecap = nil
     }
     
+    @available(*, deprecated, message: "Use updatePlayerStats via RPC")
     private func updateUserStats(userId: String, isWin: Bool, gameType: String, score: Int?) async throws {
         guard let client = supabaseService.getClient() else {
             throw DuelError.userStatsNotFound
@@ -743,6 +745,7 @@ class DuelService: ObservableObject {
             .execute()
     }
     
+    @available(*, deprecated, message: "Use updatePlayerStats via RPC")
     private func calculateLevel(from experience: Int) -> Int {
         // Level calculation: 100 XP per level for first 10 levels, then 150 XP per level
         if experience < 1000 {

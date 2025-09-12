@@ -570,13 +570,19 @@ class OCRVerificationService: ObservableObject {
         try await client
             .from("duels")
             .update([
-                "verification_status": "completed",
+                "status": "completed",
+                "verification_status": "verified",
+                "verification_method": "ocr",
                 "winner_id": winnerId,
                 "loser_id": loserId,
-                "final_scores": String(data: try JSONEncoder().encode(scores), encoding: .utf8) ?? "{}"
+                "final_scores": String(data: try JSONEncoder().encode(scores), encoding: .utf8) ?? "{}",
+                "ended_at": Date()
             ])
             .eq("id", value: duelId)
             .execute()
+
+        // Update player statistics and emit victory recap
+        try await DuelService.shared.updatePlayerStats(duelId: duelId)
     }
     
     private func generateVictoryRecap(duelId: String) async {

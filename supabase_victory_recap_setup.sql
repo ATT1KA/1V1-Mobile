@@ -5,10 +5,17 @@
 -- Safety: run inside public schema
 set search_path = public;
 
+-- Idempotency ledger for duel stats updates
+create table if not exists public.duel_stats_updates (
+  duel_id uuid primary key,
+  applied_at timestamptz default now()
+);
+
 -- Drop if exists for idempotency
-drop function if exists public.update_duel_stats(p_winner_id uuid, p_loser_id uuid, p_winner_score int, p_loser_score int, p_game_type text);
+drop function if exists public.update_duel_stats(p_duel_id uuid, p_winner_id uuid, p_loser_id uuid, p_winner_score int, p_loser_score int, p_game_type text);
 
 create or replace function public.update_duel_stats(
+  p_duel_id uuid,
   p_winner_id uuid,
   p_loser_id uuid,
   p_winner_score int,
@@ -18,6 +25,7 @@ create or replace function public.update_duel_stats(
 returns jsonb
 language plpgsql
 security definer
+set search_path = public
 as $$
 declare
   v_winner_row record;
@@ -29,6 +37,7 @@ declare
   v_winner_after jsonb;
   v_loser_after jsonb;
   v_result jsonb;
+  v_applied int;
 
   -- Helper XP/level vars
   v_winner_xp int;
@@ -86,6 +95,31 @@ begin
     v_winner_before := v_winner_stats;
     v_loser_before := v_loser_stats;
 
+    -- Idempotency guard: only apply once per duel_id
+    insert into public.duel_stats_updates(duel_id)
+    values (p_duel_id)
+    on conflict do nothing
+    returning 1 into v_applied;
+
+    if v_applied is null then
+      -- Already applied; return current state with before == after
+      v_winner_after := v_winner_before;
+      v_loser_after := v_loser_before;
+      v_result := jsonb_build_object(
+        'winner', jsonb_build_object(
+          'user_id', p_winner_id,
+          'before', v_winner_before,
+          'after',  v_winner_after
+        ),
+        'loser', jsonb_build_object(
+          'user_id', p_loser_id,
+          'before', v_loser_before,
+          'after',  v_loser_after
+        )
+      );
+      return v_result;
+    end if;
+
     -- Compute new stats
     v_winner_xp := 100 + coalesce(p_winner_score, 0) * 2;
     v_loser_xp := 25 + coalesce(p_loser_score, 0);
@@ -141,8 +175,8 @@ begin
     v_loser_stats := v_loser_stats || jsonb_build_object('level', greatest(v_new_level, (v_loser_stats->>'level')::int));
 
     -- Persist updates atomically
-    update profiles set stats = v_winner_stats where id = p_winner_id;
-    update profiles set stats = v_loser_stats where id = p_loser_id;
+    update profiles set stats = v_winner_stats, updated_at = now() where id = p_winner_id;
+    update profiles set stats = v_loser_stats, updated_at = now() where id = p_loser_id;
 
     v_winner_after := v_winner_stats;
     v_loser_after := v_loser_stats;

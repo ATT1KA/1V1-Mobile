@@ -118,13 +118,17 @@ class SupabaseService: ObservableObject {
                 .execute()
                 .value
             return result
+        } catch let postgrestError as PostgrestError {
+            print("RPC error: \(postgrestError)")
+            throw SupabaseError.serverError(message: postgrestError.message)
         } catch {
+            print("RPC error: \(error)")
             // Map common error categories
             let nsError = error as NSError
             if nsError.domain.contains("Auth") {
                 throw SupabaseError.authenticationError
             }
-            throw SupabaseError.networkError
+            throw SupabaseError.underlying(error)
         }
     }
     
@@ -215,6 +219,8 @@ enum SupabaseError: Error, LocalizedError {
     case configurationError
     case networkError
     case authenticationError
+    case serverError(message: String)
+    case underlying(Error)
     
     var errorDescription: String? {
         switch self {
@@ -226,6 +232,10 @@ enum SupabaseError: Error, LocalizedError {
             return "Network error occurred"
         case .authenticationError:
             return "Authentication error"
+        case .serverError(let message):
+            return message
+        case .underlying(let error):
+            return error.localizedDescription
         }
     }
 }
