@@ -76,9 +76,7 @@ struct VictoryRecapView: View {
                 }
             }
         }
-        .sheet(isPresented: $showSharing) {
-            VictorySharingView(victoryRecap: victoryRecap, shareableImage: shareableImage)
-        }
+        // Replaced custom sharing sheet with system share sheet via UIActivityViewController
         .onAppear {
             startVictoryAnimation()
         }
@@ -436,7 +434,10 @@ struct VictoryRecapView: View {
             
             HStack(spacing: 12) {
                 Button(action: {
-                    showSharing = true
+                    Task {
+                        await generateShareableImage()
+                        await presentActivityViewController()
+                    }
                 }) {
                     HStack(spacing: 8) {
                         Image(systemName: "square.and.arrow.up")
@@ -558,6 +559,33 @@ struct VictoryRecapView: View {
                 controller.view.drawHierarchy(in: controller.view.bounds, afterScreenUpdates: true)
             }
             shareableImage = image
+        }
+    }
+
+    private func presentActivityViewController() async {
+        let image: UIImage
+        if let existing = shareableImage {
+            image = existing
+        } else {
+            guard let generated = await generateShareableImageSync() else { return }
+            image = generated
+        }
+        let victoryText = "🏆 Victory! \(victoryRecap.winnerName) beat \(victoryRecap.loserName) \(victoryRecap.winnerScore)-\(victoryRecap.loserScore) in \(victoryRecap.gameType) - \(victoryRecap.gameMode)."
+        let items: [Any] = [victoryText, image]
+
+        await MainActor.run {
+            let activityVC = UIActivityViewController(activityItems: items, applicationActivities: nil)
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+               let window = windowScene.windows.first,
+               let rootVC = window.rootViewController {
+                rootVC.present(activityVC, animated: true)
+            }
+        }
+
+        // Analytics hook
+        if let user = AuthService.shared.currentUser {
+            let profile = UserProfile(from: user, stats: user.stats, card: nil, achievements: [])
+            await OnlineSharingService.shared.logShareEvent(profile: profile, platform: .general)
         }
     }
     

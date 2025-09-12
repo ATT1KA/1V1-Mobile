@@ -101,6 +101,33 @@ class SupabaseService: ObservableObject {
         return response
     }
     
+    // MARK: - RPC (Stored Procedures)
+    
+    /// Invoke a Supabase stored procedure and decode the response into a Codable type.
+    /// - Parameters:
+    ///   - functionName: The Postgres function name.
+    ///   - parameters: Key-value parameters to pass to the function.
+    /// - Returns: Decoded payload of type `T`.
+    func callRPC<T: Codable>(_ functionName: String, parameters: [String: Any]) async throws -> T {
+        guard let client = client else {
+            throw SupabaseError.clientNotInitialized
+        }
+        do {
+            let result: T = try await client
+                .rpc(functionName, params: parameters)
+                .execute()
+                .value
+            return result
+        } catch {
+            // Map common error categories
+            let nsError = error as NSError
+            if nsError.domain.contains("Auth") {
+                throw SupabaseError.authenticationError
+            }
+            throw SupabaseError.networkError
+        }
+    }
+    
     func insert<T: Codable>(into table: String, values: T) async throws {
         guard let client = client else {
             throw SupabaseError.clientNotInitialized

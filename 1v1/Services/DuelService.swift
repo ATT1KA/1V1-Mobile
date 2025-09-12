@@ -14,6 +14,7 @@ class DuelService: ObservableObject {
     @Published var completedDuels: [Duel] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
+    @Published var latestVictoryRecap: VictoryRecap?
     
     private let supabaseService = SupabaseService.shared
     private let notificationService = NotificationService.shared
@@ -586,7 +587,7 @@ class DuelService: ObservableObject {
         await notificationService.sendDisputeNotification(duelId: duelId, reason: reason)
     }
     
-    // MARK: - Statistics Updates
+    // MARK: - Statistics Updates (Atomic via RPC)
     func updatePlayerStats(duelId: String) async throws {
         guard let duel = try await getDuel(duelId),
               duel.status == .completed,
@@ -595,32 +596,98 @@ class DuelService: ObservableObject {
               let loserId = duel.loserId else {
             throw DuelError.invalidDuelForStatsUpdate
         }
-        
-        // Update winner stats
-        try await updateUserStats(
-            userId: winnerId,
-            isWin: true,
+
+        struct RPCEntry: Codable {
+            let user_id: String
+            let before: UserStats
+            let after: UserStats
+        }
+        struct UpdateDuelStatsResponse: Codable {
+            let winner: RPCEntry
+            let loser: RPCEntry
+        }
+
+        // Determine scores
+        let winnerScore = (duel.challengerId == winnerId ? duel.challengerScore : duel.opponentScore) ?? 0
+        let loserScore = (duel.challengerId == loserId ? duel.challengerScore : duel.opponentScore) ?? 0
+
+        // Call atomic RPC
+        let rpcParams: [String: Any] = [
+            "p_winner_id": winnerId,
+            "p_loser_id": loserId,
+            "p_winner_score": winnerScore,
+            "p_loser_score": loserScore,
+            "p_game_type": duel.gameType
+        ]
+
+        let rpcResult: UpdateDuelStatsResponse = try await supabaseService.callRPC("update_duel_stats", parameters: rpcParams)
+
+        // Compute deltas
+        func computeDelta(userId: String, before: UserStats, after: UserStats) -> UserStatsChange {
+            let winsChange = max(0, after.wins - before.wins)
+            let lossesChange = max(0, after.losses - before.losses)
+            let experienceChange = max(0, after.experience - before.experience)
+            let winRateChange = after.winRate - before.winRate
+            let levelDelta = after.level > before.level ? (after.level - before.level) : nil
+            return UserStatsChange(
+                userId: userId,
+                winsChange: winsChange,
+                lossesChange: lossesChange,
+                winRateChange: winRateChange,
+                levelChange: levelDelta,
+                experienceChange: experienceChange
+            )
+        }
+
+        let winnerDelta = computeDelta(userId: rpcResult.winner.user_id, before: rpcResult.winner.before, after: rpcResult.winner.after)
+        let loserDelta = computeDelta(userId: rpcResult.loser.user_id, before: rpcResult.loser.before, after: rpcResult.loser.after)
+        let statsUpdate = StatsUpdate(winnerStatsChange: winnerDelta, loserStatsChange: loserDelta)
+
+        // Load usernames for recap
+        guard let client = supabaseService.getClient() else { throw DuelError.duelNotFound }
+        let users: [User] = try await client
+            .from("profiles")
+            .select()
+            .in("id", values: [winnerId, loserId])
+            .execute()
+            .value
+        let winnerName = users.first(where: { $0.id == winnerId })?.username ?? "Winner"
+        let loserName = users.first(where: { $0.id == loserId })?.username ?? "Opponent"
+
+        // Build recap
+        let duration: TimeInterval = {
+            if let start = duel.startedAt, let end = duel.endedAt { return end.timeIntervalSince(start) }
+            return 0
+        }()
+        let recap = VictoryRecap(
+            duelId: duel.id,
+            winnerName: winnerName,
+            loserName: loserName,
+            winnerScore: winnerScore,
+            loserScore: loserScore,
             gameType: duel.gameType,
-            score: duel.challengerId == winnerId ? duel.challengerScore : duel.opponentScore
+            gameMode: duel.gameMode,
+            matchDuration: duration,
+            verificationMethod: duel.verificationMethod ?? .ocr,
+            completedAt: duel.endedAt ?? Date(),
+            shareableImageUrl: nil,
+            statsUpdate: statsUpdate
         )
 
-        // Update loser stats
-        try await updateUserStats(
-            userId: loserId,
-            isWin: false,
-            gameType: duel.gameType,
-            score: duel.challengerId == loserId ? duel.challengerScore : duel.opponentScore
-        )
+        // Emit recap for UI
+        self.latestVictoryRecap = recap
 
         // Award points for duel completion (best-effort; do not fail the stats update)
         do {
-            let winnerScore = duel.challengerId == winnerId ? duel.challengerScore : duel.opponentScore
-            let loserScore = duel.challengerId == loserId ? duel.challengerScore : duel.opponentScore
-            try await PointsService.shared.awardDuelPoints(userId: winnerId, duelId: duelId, isWin: true, score: winnerScore ?? 0)
-            try await PointsService.shared.awardDuelPoints(userId: loserId, duelId: duelId, isWin: false, score: loserScore ?? 0)
+            try await PointsService.shared.awardDuelPoints(userId: winnerId, duelId: duelId, isWin: true, score: winnerScore)
+            try await PointsService.shared.awardDuelPoints(userId: loserId, duelId: duelId, isWin: false, score: loserScore)
         } catch {
             print("Failed to award points for duel \(duelId): \(error)")
         }
+    }
+
+    func clearLatestVictoryRecap() {
+        latestVictoryRecap = nil
     }
     
     private func updateUserStats(userId: String, isWin: Bool, gameType: String, score: Int?) async throws {

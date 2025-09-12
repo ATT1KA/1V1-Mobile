@@ -6,6 +6,8 @@ struct MatchEndConfirmationView: View {
     let opponentDisplayName: String?
     let onConfirm: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var presentVictoryRecap: Bool = false
+    @State private var victoryRecap: VictoryRecap?
 
     private var titleText: String { "End Match" }
 
@@ -108,6 +110,19 @@ struct MatchEndConfirmationView: View {
                     .buttonStyle(PrimaryButtonStyle())
                     .tint(.red)
                 }
+            }
+        }
+        .onReceive(DuelService.shared.$latestVictoryRecap) { recap in
+            guard let recap = recap, recap.duelId == duel.id else { return }
+            victoryRecap = recap
+            presentVictoryRecap = true
+        }
+        .fullScreenCover(isPresented: $presentVictoryRecap, onDismiss: {
+            DuelService.shared.clearLatestVictoryRecap()
+        }) {
+            if let recap = victoryRecap {
+                VictoryRecapView(victoryRecap: recap)
+                    .preferredColorScheme(.dark)
             }
         }
     }
