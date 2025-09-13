@@ -273,6 +273,69 @@ SUPABASE_ANON_KEY=your-anon-key-here
 7. **Validate all user inputs**
 8. **Implement proper error handling**
 
+## Victory Recap: Atomic Stats Update RPC
+
+This app uses an atomic stored procedure to update both winner and loser stats after a verified duel and to return before/after snapshots for client-side animations and sharing.
+
+### 1. Apply the SQL
+
+Run the following file in the Supabase SQL editor or `psql`:
+
+```sql
+-- Run this script
+-- supabase_victory_recap_setup.sql
+```
+
+This creates `public.update_duel_stats(p_winner_id uuid, p_loser_id uuid, p_winner_score int, p_loser_score int, p_game_type text) returns jsonb` with `SECURITY DEFINER`.
+
+### 2. What it does
+
+- Atomically locks both `profiles` rows with `FOR UPDATE`
+- Reads `stats` JSONB, applies defaults, increments wins/losses, total games, experience, best score, and favorite game
+- Recomputes win rate and level (100 XP/level up to 10; then 150 XP/level)
+- Updates both rows in one transaction
+- Returns JSONB `{ winner: { user_id, before, after }, loser: { user_id, before, after } }`
+
+### 3. Why transaction safety matters
+
+- Prevents race conditions when both players finish at the same time
+- Guarantees stats never drift between users
+- Enables clean client-side delta animations using before/after snapshots
+
+### 4. Permissions and RLS
+
+- The function is `SECURITY DEFINER` so it can update across user boundaries
+- Ensure only authenticated roles can execute it as needed (example):
+
+```sql
+-- Adjust role names to match your project
+grant execute on function public.update_duel_stats(uuid, uuid, int, int, text) to authenticated;
+```
+
+RLS on `profiles` remains intact; the function runs with definer privileges.
+
+### 5. Testing the RPC
+
+Use the SQL editor to simulate a match:
+
+```sql
+select public.update_duel_stats(
+  p_winner_id => '00000000-0000-0000-0000-000000000001',
+  p_loser_id  => '00000000-0000-0000-0000-000000000002',
+  p_winner_score => 15,
+  p_loser_score  => 8,
+  p_game_type    => 'Call of Duty: Warzone'
+);
+```
+
+You should see a JSON payload with `before` and `after` for both users. Verify that both `profiles.stats` were updated accordingly.
+
+### 6. App integration
+
+- The app invokes this function via `SupabaseService.callRPC("update_duel_stats", parameters: ...)`
+- `DuelService.updatePlayerStats` calls the RPC after verification, computes deltas, and publishes `latestVictoryRecap` for UI
+- `VictoryRecapView` presents animated changes and supports system sharing via `UIActivityViewController`
+
 ## Next Steps
 
 1. Set up real-time subscriptions for live game updates

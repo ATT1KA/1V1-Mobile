@@ -101,6 +101,37 @@ class SupabaseService: ObservableObject {
         return response
     }
     
+    // MARK: - RPC (Stored Procedures)
+    
+    /// Invoke a Supabase stored procedure and decode the response into a Codable type.
+    /// - Parameters:
+    ///   - functionName: The Postgres function name.
+    ///   - parameters: Key-value parameters to pass to the function.
+    /// - Returns: Decoded payload of type `T`.
+    func callRPC<T: Codable>(_ functionName: String, parameters: [String: Any]) async throws -> T {
+        guard let client = client else {
+            throw SupabaseError.clientNotInitialized
+        }
+        do {
+            let result: T = try await client
+                .rpc(functionName, params: parameters)
+                .execute()
+                .value
+            return result
+        } catch let postgrestError as PostgrestError {
+            print("RPC error: \(postgrestError)")
+            throw SupabaseError.serverError(message: postgrestError.message)
+        } catch {
+            print("RPC error: \(error)")
+            // Map common error categories
+            let nsError = error as NSError
+            if nsError.domain.contains("Auth") {
+                throw SupabaseError.authenticationError
+            }
+            throw SupabaseError.underlying(error)
+        }
+    }
+    
     func insert<T: Codable>(into table: String, values: T) async throws {
         guard let client = client else {
             throw SupabaseError.clientNotInitialized
@@ -188,6 +219,8 @@ enum SupabaseError: Error, LocalizedError {
     case configurationError
     case networkError
     case authenticationError
+    case serverError(message: String)
+    case underlying(Error)
     
     var errorDescription: String? {
         switch self {
@@ -199,6 +232,10 @@ enum SupabaseError: Error, LocalizedError {
             return "Network error occurred"
         case .authenticationError:
             return "Authentication error"
+        case .serverError(let message):
+            return message
+        case .underlying(let error):
+            return error.localizedDescription
         }
     }
 }

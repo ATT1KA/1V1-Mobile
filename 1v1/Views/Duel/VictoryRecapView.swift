@@ -76,9 +76,7 @@ struct VictoryRecapView: View {
                 }
             }
         }
-        .sheet(isPresented: $showSharing) {
-            VictorySharingView(victoryRecap: victoryRecap, shareableImage: shareableImage)
-        }
+        // Replaced custom sharing sheet with system share sheet via UIActivityViewController
         .onAppear {
             startVictoryAnimation()
         }
@@ -436,7 +434,10 @@ struct VictoryRecapView: View {
             
             HStack(spacing: 12) {
                 Button(action: {
-                    showSharing = true
+                    Task {
+                        await generateShareableImage()
+                        await presentActivityViewController()
+                    }
                 }) {
                     HStack(spacing: 8) {
                         Image(systemName: "square.and.arrow.up")
@@ -558,6 +559,36 @@ struct VictoryRecapView: View {
                 controller.view.drawHierarchy(in: controller.view.bounds, afterScreenUpdates: true)
             }
             shareableImage = image
+        }
+    }
+
+    private func presentActivityViewController() async {
+        let image: UIImage
+        if let existing = shareableImage {
+            image = existing
+        } else {
+            guard let generated = await generateShareableImageSync() else { return }
+            image = generated
+        }
+        let victoryText = "🏆 Victory! \(victoryRecap.winnerName) beat \(victoryRecap.loserName) \(victoryRecap.winnerScore)-\(victoryRecap.loserScore) in \(victoryRecap.gameType) - \(victoryRecap.gameMode)."
+        let items: [Any] = [victoryText, image]
+
+        await MainActor.run {
+            let activityVC = UIActivityViewController(activityItems: items, applicationActivities: nil)
+            if let pop = activityVC.popoverPresentationController,
+               let window = UIApplication.shared.windows.first(where: { $0.isKeyWindow }) {
+                pop.sourceView = window
+                pop.sourceRect = CGRect(x: window.bounds.midX, y: window.bounds.maxY - 1, width: 1, height: 1)
+                pop.permittedArrowDirections = []
+            }
+            let keyWindow = UIApplication.shared.windows.first { $0.isKeyWindow }
+            keyWindow?.rootViewController?.present(activityVC, animated: true)
+        }
+
+        // Analytics hook
+        if let user = AuthService.shared.currentUser {
+            let profile = UserProfile(from: user, stats: user.stats, card: nil, achievements: [])
+            await OnlineSharingService.shared.logShareEvent(profile: profile, platform: .general)
         }
     }
     
@@ -802,7 +833,8 @@ struct VictoryConfettiView: View {
     private func createConfetti() {
         let colors: [Color] = [.yellow, .orange, .red, .purple, .blue, .green]
         
-        for i in 0..<50 {
+        let count = ProcessInfo.processInfo.isLowPowerModeEnabled ? 20 : 50
+        for i in 0..<count {
             let item = ConfettiItem(
                 id: i,
                 x: CGFloat.random(in: 0...UIScreen.main.bounds.width),

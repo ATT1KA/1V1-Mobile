@@ -42,6 +42,11 @@ struct User: Codable, Identifiable {
     }
 }
 
+struct LightProfile: Codable {
+    let id: String
+    let username: String?
+}
+
 struct UserStats: Codable {
     var wins: Int
     var losses: Int

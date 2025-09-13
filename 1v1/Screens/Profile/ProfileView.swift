@@ -6,6 +6,8 @@ struct ProfileView: View {
     @EnvironmentObject var preferences: PreferencesService
     @State private var showingSignOutAlert = false
     @State private var showingDeleteAccountAlert = false
+    @StateObject private var pointsService = PointsService.shared
+    @State private var leaderboardOptIn: Bool = false
     
     var body: some View {
         NavigationView {
@@ -30,6 +32,8 @@ struct ProfileView: View {
                         Spacer()
                     }
                     .padding(.vertical, 8)
+
+                    PointsBalanceView()
                 }
                 
                 // Account Section
@@ -44,6 +48,28 @@ struct ProfileView: View {
                     
                     NavigationLink(destination: Text("Privacy Settings")) {
                         Label("Privacy Settings", systemImage: "hand.raised")
+                    }
+
+                    Toggle(isOn: $leaderboardOptIn) {
+                        Label("Show on Leaderboards", systemImage: "trophy.fill")
+                    }
+                    .task {
+                        if let userId = authService.currentUser?.id, let client = SupabaseService.shared.getClient() {
+                            if let rows: [[String: Any]] = try? await client.from("profiles").select("leaderboard_opt_in").eq("id", value: userId).limit(1).execute().value,
+                               let first = rows.first, let optIn = first["leaderboard_opt_in"] as? Bool {
+                                self.leaderboardOptIn = optIn
+                            }
+                        }
+                    }
+                    .onChange(of: leaderboardOptIn) { newValue in
+                        Task {
+                            guard let userId = authService.currentUser?.id, let client = SupabaseService.shared.getClient() else { return }
+                            do {
+                                try await client.from("profiles").update(["leaderboard_opt_in": newValue]).eq("id", value: userId).execute()
+                            } catch {
+                                print("Failed to update leaderboard opt-in: \(error)")
+                            }
+                        }
                     }
                 }
                 
