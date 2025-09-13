@@ -54,6 +54,7 @@ struct GameConfiguration: Codable, Identifiable {
         let validationRules: [ValidationRule]
         let isRequired: Bool
         let description: String?
+        let patternKey: String? // Optional override for regex lookup
         
         enum CodingKeys: String, CodingKey {
             case name
@@ -62,6 +63,7 @@ struct GameConfiguration: Codable, Identifiable {
             case validationRules = "validation_rules"
             case isRequired = "is_required"
             case description
+            case patternKey = "pattern_key"
         }
     }
     
@@ -183,7 +185,8 @@ extension GameConfiguration {
                         ValidationRule(type: .required, parameter: "", errorMessage: "Player 1 score is required")
                     ],
                     isRequired: true,
-                    description: "Player 1 elimination count"
+                    description: "Player 1 elimination count",
+                    patternKey: "player1_score"
                 ),
                 OCRRegion(
                     name: "player2_score",
@@ -194,7 +197,8 @@ extension GameConfiguration {
                         ValidationRule(type: .required, parameter: "", errorMessage: "Player 2 score is required")
                     ],
                     isRequired: true,
-                    description: "Player 2 elimination count"
+                    description: "Player 2 elimination count",
+                    patternKey: "player2_score"
                 ),
                 OCRRegion(
                     name: "player1_id",
@@ -206,7 +210,8 @@ extension GameConfiguration {
                         ValidationRule(type: .regex, parameter: "[A-Za-z0-9_]{3,20}", errorMessage: "Invalid player ID format")
                     ],
                     isRequired: true,
-                    description: "Player 1 gamertag"
+                    description: "Player 1 gamertag",
+                    patternKey: "player1_id"
                 ),
                 OCRRegion(
                     name: "player2_id",
@@ -218,10 +223,15 @@ extension GameConfiguration {
                         ValidationRule(type: .regex, parameter: "[A-Za-z0-9_]{3,20}", errorMessage: "Invalid player ID format")
                     ],
                     isRequired: true,
-                    description: "Player 2 gamertag"
+                    description: "Player 2 gamertag",
+                    patternKey: "player2_id"
                 )
             ],
             textPatterns: [
+                "player1_score": "\\d+",
+                "player2_score": "\\d+",
+                "player1_id": "[A-Za-z0-9_]{3,20}",
+                "player2_id": "[A-Za-z0-9_]{3,20}",
                 "score": "\\d+",
                 "player_id": "[A-Za-z0-9_]{3,20}",
                 "elimination": "(?i)elimination|elim|kill",
@@ -267,7 +277,8 @@ extension GameConfiguration {
                         ValidationRule(type: .range, parameter: "0-50", errorMessage: "Score must be between 0-50")
                     ],
                     isRequired: true,
-                    description: "Player 1 build points"
+                    description: "Player 1 build points",
+                    patternKey: "player1_score"
                 ),
                 OCRRegion(
                     name: "player2_score",
@@ -277,7 +288,8 @@ extension GameConfiguration {
                         ValidationRule(type: .range, parameter: "0-50", errorMessage: "Score must be between 0-50")
                     ],
                     isRequired: true,
-                    description: "Player 2 build points"
+                    description: "Player 2 build points",
+                    patternKey: "player2_score"
                 ),
                 OCRRegion(
                     name: "build_quality",
@@ -291,6 +303,8 @@ extension GameConfiguration {
                 )
             ],
             textPatterns: [
+                "player1_score": "\\d+",
+                "player2_score": "\\d+",
                 "score": "\\d+",
                 "build_quality": "(?i)(excellent|good|average|poor)",
                 "player_id": "[A-Za-z0-9_]{3,20}"
@@ -335,7 +349,8 @@ extension GameConfiguration {
                         ValidationRule(type: .range, parameter: "0-13", errorMessage: "Score must be between 0-13")
                     ],
                     isRequired: true,
-                    description: "Player 1 round wins"
+                    description: "Player 1 round wins",
+                    patternKey: "player1_score"
                 ),
                 OCRRegion(
                     name: "player2_score",
@@ -345,7 +360,8 @@ extension GameConfiguration {
                         ValidationRule(type: .range, parameter: "0-13", errorMessage: "Score must be between 0-13")
                     ],
                     isRequired: true,
-                    description: "Player 2 round wins"
+                    description: "Player 2 round wins",
+                    patternKey: "player2_score"
                 ),
                 OCRRegion(
                     name: "match_duration",
@@ -359,6 +375,8 @@ extension GameConfiguration {
                 )
             ],
             textPatterns: [
+                "player1_score": "\\d+",
+                "player2_score": "\\d+",
                 "score": "\\d+",
                 "time": "\\d{1,2}:\\d{2}",
                 "player_id": "[A-Za-z0-9_#]{3,20}"
@@ -403,7 +421,8 @@ extension GameConfiguration {
                         ValidationRule(type: .range, parameter: "0-30", errorMessage: "Score must be between 0-30")
                     ],
                     isRequired: true,
-                    description: "Player 1 eliminations"
+                    description: "Player 1 eliminations",
+                    patternKey: "player1_score"
                 ),
                 OCRRegion(
                     name: "player2_score",
@@ -413,7 +432,8 @@ extension GameConfiguration {
                         ValidationRule(type: .range, parameter: "0-30", errorMessage: "Score must be between 0-30")
                     ],
                     isRequired: true,
-                    description: "Player 2 eliminations"
+                    description: "Player 2 eliminations",
+                    patternKey: "player2_score"
                 ),
                 OCRRegion(
                     name: "damage_dealt",
@@ -427,6 +447,8 @@ extension GameConfiguration {
                 )
             ],
             textPatterns: [
+                "player1_score": "\\d+",
+                "player2_score": "\\d+",
                 "score": "\\d+",
                 "damage": "\\d{1,4}",
                 "player_id": "[A-Za-z0-9_]{3,20}"

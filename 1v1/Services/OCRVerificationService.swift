@@ -3,8 +3,26 @@ import UIKit
 import Vision
 import CoreImage
 import CoreImage.CIFilterBuiltins
+import Supabase
 
-@MainActor
+// MARK: - Task store to avoid data races
+private actor OCRTaskStore {
+    private var tasks: [String: Task<DuelSubmission, Error>] = [:]
+
+    func set(_ task: Task<DuelSubmission, Error>, for duelId: String) {
+        tasks[duelId] = task
+    }
+
+    func remove(for duelId: String) {
+        tasks.removeValue(forKey: duelId)
+    }
+
+    func cancelAll() {
+        tasks.values.forEach { $0.cancel() }
+        tasks.removeAll()
+    }
+}
+
 class OCRVerificationService: ObservableObject {
     static let shared = OCRVerificationService()
     
@@ -15,22 +33,20 @@ class OCRVerificationService: ObservableObject {
     private let supabaseService = SupabaseService.shared
     private let storageService = StorageService()
     private let gameConfigService = GameConfigurationService.shared
-    private var activeProcessingTasks: [String: Task<DuelSubmission, Error>] = [:]
+    private let taskStore = OCRTaskStore()
     
     private init() {}
     
     deinit {
         // Cancel all active tasks
-        activeProcessingTasks.values.forEach { $0.cancel() }
-        activeProcessingTasks.removeAll()
+        Task { await taskStore.cancelAll() }
     }
 
     // MARK: - Cancellation
     @MainActor
     func cancelActiveWork() {
         // Cancel any active processing Tasks directly
-        activeProcessingTasks.values.forEach { $0.cancel() }
-        activeProcessingTasks.removeAll()
+        Task { await taskStore.cancelAll() }
         isProcessing = false
         processingProgress = 0.0
         errorMessage = nil
@@ -44,25 +60,29 @@ class OCRVerificationService: ObservableObject {
         gameType: String,
         gameMode: String
     ) async throws -> DuelSubmission {
-        isProcessing = true
-        processingProgress = 0.0
+        await MainActor.run {
+            self.isProcessing = true
+            self.processingProgress = 0.0
+        }
 
         defer {
-            isProcessing = false
-            processingProgress = 0.0
+            Task { @MainActor in
+                self.isProcessing = false
+                self.processingProgress = 0.0
+            }
         }
 
         // Create the actual processing Task and store it directly so cancellation affects
         // the Task executing `runProcessing(...)`.
-        let processingTask = Task<DuelSubmission, Error> { @MainActor in
+        let processingTask = Task<DuelSubmission, Error> {
             return try await runProcessing(for: duelId, userId: userId, image: image, gameType: gameType, gameMode: gameMode)
         }
 
         // Store handle so callers can cancel the processing Task directly
-        activeProcessingTasks[duelId] = processingTask
+        await taskStore.set(processingTask, for: duelId)
         defer {
             // Remove stored handle when done
-            activeProcessingTasks.removeValue(forKey: duelId)
+            Task { await taskStore.remove(for: duelId) }
         }
 
         do {
@@ -70,16 +90,17 @@ class OCRVerificationService: ObservableObject {
             return submission
         } catch {
             // Map cancellation into a friendly state
-            if Task.isCancelled {
-                errorMessage = "Processing canceled"
-            } else {
-                errorMessage = "Screenshot processing failed: \(error.localizedDescription)"
+            await MainActor.run {
+                if Task.isCancelled {
+                    self.errorMessage = "Processing canceled"
+                } else {
+                    self.errorMessage = "Screenshot processing failed: \(error.localizedDescription)"
+                }
             }
             throw error
         }
     }
 
-    @MainActor
     private func runProcessing(
         for duelId: String,
         userId: String,
@@ -88,16 +109,16 @@ class OCRVerificationService: ObservableObject {
         gameMode: String
     ) async throws -> DuelSubmission {
         // Load game-specific configuration
-        processingProgress = 0.1
+        await MainActor.run { self.processingProgress = 0.1 }
         let config = try await gameConfigService.getConfiguration(for: gameType, mode: gameMode)
 
         // Upload screenshot first (we store the storage path and request signed URLs when needed)
-        processingProgress = 0.2
+        await MainActor.run { self.processingProgress = 0.2 }
         try Task.checkCancellation()
         let screenshotPath = try await uploadScreenshot(image: image, duelId: duelId, userId: userId)
 
         // Apply game-specific preprocessing
-        processingProgress = 0.3
+        await MainActor.run { self.processingProgress = 0.3 }
         try Task.checkCancellation()
         let processedImage = try await applyPreprocessing(
             image: image,
@@ -105,26 +126,32 @@ class OCRVerificationService: ObservableObject {
         )
 
         // Perform region-specific OCR
-        processingProgress = 0.5
+        await MainActor.run { self.processingProgress = 0.5 }
         try Task.checkCancellation()
-        let ocrResults = try await performRegionBasedOCR(
-            image: processedImage,
-            regions: config.ocrSettings.regions,
-            patterns: config.ocrSettings.textPatterns,
-            threshold: config.ocrSettings.confidenceThreshold
-        )
+        let ocrResults: OCRResult = try await withOCRTimeout(15.0) { [
+            weak self
+        ] in
+            guard let self = self else { throw OCRError.processingTimeout }
+            return try await self.performRegionBasedOCR(
+                image: processedImage,
+                regions: config.ocrSettings.regions,
+                patterns: config.ocrSettings.textPatterns,
+                threshold: config.ocrSettings.confidenceThreshold
+            )
+        }
 
         // Validate results against game-specific rules
-        processingProgress = 0.7
+        await MainActor.run { self.processingProgress = 0.7 }
         try Task.checkCancellation()
         let validatedResults = try await validateOCRResults(
             results: ocrResults,
             validation: config.scoreValidation,
-            duelId: duelId
+            duelId: duelId,
+            confidenceThreshold: config.ocrSettings.confidenceThreshold
         )
 
         // Create submission
-        processingProgress = 0.9
+        await MainActor.run { self.processingProgress = 0.9 }
         let submission = DuelSubmission(
             id: UUID().uuidString,
             duelId: duelId,
@@ -143,8 +170,24 @@ class OCRVerificationService: ObservableObject {
         // Check if both submissions received for auto-verification
         await checkDuelVerification(duelId: duelId)
 
-        processingProgress = 1.0
+        await MainActor.run { self.processingProgress = 1.0 }
         return submission
+    }
+
+    // MARK: - Timeout helper specific to OCR
+    private func withOCRTimeout<T>(_ seconds: Double, operation: @escaping () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                return try await operation()
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw OCRError.processingTimeout
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
     }
     
     // MARK: - Image Preprocessing
@@ -210,9 +253,23 @@ class OCRVerificationService: ObservableObject {
             )
             
             // Apply pattern matching
+            // Determine best pattern: explicit patternKey or region name; then sensible fallbacks
+            let primaryKey = region.patternKey ?? region.name
+            let pattern: String = {
+                if let p = patterns[primaryKey] { return p }
+                switch region.expectedFormat.lowercased() {
+                case "number":
+                    return patterns["score"] ?? "\\d+"
+                case "text":
+                    return patterns["player_id"] ?? ".*"
+                default:
+                    return patterns.values.first ?? ".*"
+                }
+            }()
+
             let matchedText = applyPatternMatching(
                 text: regionResult.extractedText,
-                pattern: patterns[region.expectedFormat] ?? ".*"
+                pattern: pattern
             )
             
             extractedData[region.name] = matchedText
@@ -295,7 +352,11 @@ class OCRVerificationService: ObservableObject {
             }
             
             let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-            try? handler.perform([request])
+            do {
+                try handler.perform([request])
+            } catch {
+                continuation.resume(throwing: error)
+            }
         }
     }
     
@@ -303,7 +364,8 @@ class OCRVerificationService: ObservableObject {
     private func validateOCRResults(
         results: OCRResult,
         validation: GameConfiguration.ScoreValidation,
-        duelId: String
+        duelId: String,
+        confidenceThreshold: Double
     ) async throws -> OCRResult {
         
         // Validate score ranges
@@ -333,8 +395,7 @@ class OCRVerificationService: ObservableObject {
             try validateSurvival(results: results, validation: validation)
         }
         
-        // Check confidence threshold (using default 0.95)
-        let confidenceThreshold: Double = 0.95
+        // Check configured confidence threshold
         guard results.confidence >= confidenceThreshold else {
             throw OCRError.lowConfidence(
                 actual: results.confidence,
@@ -348,17 +409,28 @@ class OCRVerificationService: ObservableObject {
     // MARK: - Verification Logic
     private func checkDuelVerification(duelId: String) async {
         do {
-            let submissions: [DuelSubmission] = try await supabaseService.fetch(
-                from: "duel_submissions"
-            )
+            guard let client = supabaseService.getClient() else { return }
+            let submissions: [DuelSubmission] = try await client
+                .from("duel_submissions")
+                .select()
+                .eq("duel_id", value: duelId)
+                .execute()
+                .value
             
             guard submissions.count == 2 else { return }
             
-            let duel: [Duel] = try await supabaseService.fetch(
-                from: "duels"
-            )
-            
-            guard let currentDuel = duel.first else { return }
+            let duels: [Duel] = try await client
+                .from("duels")
+                .select()
+                .eq("id", value: duelId)
+                .limit(1)
+                .execute()
+                .value
+            guard let currentDuel = duels.first else { return }
+
+            // Load per-game configuration threshold for auto-approval
+            let config = try await gameConfigService.getConfiguration(for: currentDuel.gameType, mode: currentDuel.gameMode)
+            let threshold = config.ocrSettings.confidenceThreshold
             
             let challengerSubmission = submissions.first { $0.userId == currentDuel.challengerId }
             let opponentSubmission = submissions.first { $0.userId == currentDuel.opponentId }
@@ -370,7 +442,7 @@ class OCRVerificationService: ObservableObject {
             let challengerConfidence = challenger.confidence ?? 0
             let opponentConfidence = opponent.confidence ?? 0
             
-            if challengerConfidence > 0.95 && opponentConfidence > 0.95 {
+            if challengerConfidence >= threshold && opponentConfidence >= threshold {
                 // Auto-approve if both have high confidence
                 await autoApproveDuel(duelId: duelId, submissions: submissions)
             } else {
@@ -386,7 +458,14 @@ class OCRVerificationService: ObservableObject {
     private func autoApproveDuel(duelId: String, submissions: [DuelSubmission]) async {
         do {
             // Extract scores and determine winner
-            let scores = extractFinalScores(from: submissions)
+            guard let duel = try await DuelService.shared.getDuel(duelId) else { return }
+            let scores = try await extractFinalScores(from: submissions, duel: duel)
+
+            // If either participant is missing a score mapping, fall back to mutual confirmation
+            guard scores.keys.contains(duel.challengerId), scores.keys.contains(duel.opponentId) else {
+                await requireMutualConfirmation(duelId: duelId)
+                return
+            }
             
             // Update duel with results
             try await updateDuelResults(duelId: duelId, scores: scores)
@@ -397,6 +476,77 @@ class OCRVerificationService: ObservableObject {
         } catch {
             print("Error auto-approving duel: \(error)")
         }
+    }
+
+    // MARK: - Score Mapping Helpers
+    private struct LightProfile: Codable {
+        let id: String
+        let username: String?
+    }
+
+    private func loadUsernames(challengerId: String, opponentId: String) async throws -> (challenger: String?, opponent: String?) {
+        guard let client = supabaseService.getClient() else { throw OCRError.networkError }
+        let users: [LightProfile] = try await client
+            .from("profiles")
+            .select("id,username")
+            .in("id", values: [challengerId, opponentId])
+            .execute()
+            .value
+        let ch = users.first(where: { $0.id == challengerId })?.username
+        let op = users.first(where: { $0.id == opponentId })?.username
+        return (challenger: ch, opponent: op)
+    }
+
+    private func roughlyEquals(_ a: String?, _ b: String?) -> Bool {
+        guard let a = a?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              let b = b?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !a.isEmpty, !b.isEmpty else { return false }
+        return a == b
+    }
+
+    private func mapSubmissionScoreToUser(submission: DuelSubmission, duel: Duel, challengerName: String?, opponentName: String?) -> (String, Int)? {
+        guard let result = submission.ocrResult else { return nil }
+
+        let regionPairs: [(idKey: String, scoreKey: String)] = [
+            ("player1_id", "player1_score"),
+            ("player2_id", "player2_score")
+        ]
+
+        func value(for key: String) -> String? {
+            if let text = result.regions?.first(where: { $0.regionName == key })?.extractedText { return text }
+            return result.gameSpecificData?[key]
+        }
+
+        for pair in regionPairs {
+            let idText = value(for: pair.idKey)
+            let scoreText = value(for: pair.scoreKey)
+            if let scoreText = scoreText, let score = Int(scoreText) {
+                if roughlyEquals(idText, challengerName) {
+                    return (duel.challengerId, score)
+                }
+                if roughlyEquals(idText, opponentName) {
+                    return (duel.opponentId, score)
+                }
+            }
+        }
+
+        // Fallback: assign submitter's highest score if regions did not map (last resort)
+        if let anyScore = result.scores.values.max() {
+            return (submission.userId, anyScore)
+        }
+
+        return nil
+    }
+
+    private func extractFinalScores(from submissions: [DuelSubmission], duel: Duel) async throws -> [String: Int] {
+        let names = try await loadUsernames(challengerId: duel.challengerId, opponentId: duel.opponentId)
+        var map: [String: Int] = [:]
+        for s in submissions {
+            if let mapped = mapSubmissionScoreToUser(submission: s, duel: duel, challengerName: names.challenger, opponentName: names.opponent) {
+                map[mapped.0] = mapped.1
+            }
+        }
+        return map
     }
     
     private func requireMutualConfirmation(duelId: String) async {
@@ -545,28 +695,21 @@ class OCRVerificationService: ObservableObject {
     }
     
     private func updateDuelResults(duelId: String, scores: [String: Int]) async throws {
-        guard scores.count == 2 else {
+        guard let duel = try await DuelService.shared.getDuel(duelId) else {
             throw OCRError.invalidScoreData
         }
-        
-        let sortedScores = scores.sorted { $0.value > $1.value }
-        let winnerId = sortedScores[0].key
-        let loserId = sortedScores[1].key
-        let winnerScore = sortedScores[0].value
-        let loserScore = sortedScores[1].value
-        
-        let updateData: [String: Any] = [
-            "status": "completed",
-            "winner_id": winnerId,
-            "loser_id": loserId,
-            "challenger_score": scores.values.first ?? 0,
-            "opponent_score": Array(scores.values).last ?? 0,
-            "verification_status": "verified",
-            "verification_method": "ocr",
-            "ended_at": Date()
-        ]
-        
+        let challengerScore = scores[duel.challengerId] ?? 0
+        let opponentScore = scores[duel.opponentId] ?? 0
+        let (winnerId, loserId, winnerScore, loserScore): (String, String, Int, Int) = {
+            if challengerScore >= opponentScore {
+                return (duel.challengerId, duel.opponentId, challengerScore, opponentScore)
+            } else {
+                return (duel.opponentId, duel.challengerId, opponentScore, challengerScore)
+            }
+        }()
+
         guard let client = supabaseService.getClient() else { return }
+        let iso = ISO8601DateFormatter().string(from: Date())
         try await client
             .from("duels")
             .update([
@@ -575,8 +718,10 @@ class OCRVerificationService: ObservableObject {
                 "verification_method": "ocr",
                 "winner_id": winnerId,
                 "loser_id": loserId,
+                "challenger_score": challengerScore,
+                "opponent_score": opponentScore,
                 "final_scores": String(data: try JSONEncoder().encode(scores), encoding: .utf8) ?? "{}",
-                "ended_at": Date()
+                "ended_at": iso
             ])
             .eq("id", value: duelId)
             .execute()
