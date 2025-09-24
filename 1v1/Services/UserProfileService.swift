@@ -77,7 +77,7 @@ class UserProfileService: ObservableObject {
                 userId: user.id,
                 username: user.username ?? "Player",
                 avatarUrl: user.avatarUrl,
-                stats: userStats,
+                stats: stats,
                 card: userCard,
                 achievements: achievements,
                 createdAt: user.createdAt ?? Date(),
