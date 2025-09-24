@@ -418,7 +418,7 @@ struct DuelProposalView: View {
         do {
             let duel = try await duelService.createDuel(
                 challengerId: challengerId,
-                opponentId: opponent.id ?? "",
+                opponentId: opponent.id,
                 gameType: selectedGameType,
                 gameMode: selectedGameMode,
                 challengeMessage: challengeMessage
@@ -448,8 +448,8 @@ struct DuelProposalView: View {
         do {
             // First create the duel
             let duel = try await duelService.createDuel(
-                challengerId: challenger.id ?? "",
-                opponentId: opponent.id ?? "",
+                challengerId: challenger.id,
+                opponentId: opponent.id,
                 gameType: selectedGameType,
                 gameMode: selectedGameMode,
                 challengeMessage: challengeMessage

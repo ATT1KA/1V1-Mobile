@@ -469,34 +469,30 @@ struct DuelChallengeCardView: View {
     }
     
     private func loadQRCode() async {
-        do {
-            let qrData = Data(base64Encoded: challengeCard.qrCodeData) ?? Data()
-            if let uiImage = UIImage(data: qrData) {
-                qrCodeImage = uiImage
-            } else {
-                // Fallback: generate QR code from URL
-                let context = CIContext()
-                let filter = CIFilter.qrCodeGenerator()
-                filter.message = Data(challengeCard.shareUrl.utf8)
-                filter.correctionLevel = "M"
-                
-                guard let outputImage = filter.outputImage else {
-                    print("Error generating QR code")
-                    return
-                }
-                
-                let transform = CGAffineTransform(scaleX: 10, y: 10)
-                let scaledImage = outputImage.transformed(by: transform)
-                
-                guard let cgImage = context.createCGImage(scaledImage, from: scaledImage.extent) else {
-                    print("Error creating QR code image")
-                    return
-                }
-                
-                qrCodeImage = UIImage(cgImage: cgImage)
+        let qrData = Data(base64Encoded: challengeCard.qrCodeData) ?? Data()
+        if let uiImage = UIImage(data: qrData) {
+            qrCodeImage = uiImage
+        } else {
+            // Fallback: generate QR code from URL
+            let context = CIContext()
+            let filter = CIFilter.qrCodeGenerator()
+            filter.message = Data(challengeCard.shareUrl.utf8)
+            filter.correctionLevel = "M"
+
+            guard let outputImage = filter.outputImage else {
+                print("Error generating QR code")
+                return
             }
-        } catch {
-            print("Error loading QR code: \(error)")
+
+            let transform = CGAffineTransform(scaleX: 10, y: 10)
+            let scaledImage = outputImage.transformed(by: transform)
+
+            guard let cgImage = context.createCGImage(scaledImage, from: scaledImage.extent) else {
+                print("Error creating QR code image")
+                return
+            }
+
+            qrCodeImage = UIImage(cgImage: cgImage)
         }
     }
     

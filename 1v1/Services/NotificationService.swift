@@ -188,7 +188,7 @@ class NotificationService: ObservableObject, NotificationServicing {
     
     // MARK: - Real-time Match Monitoring
     private func setupRealtimeSubscriptions() {
-        guard let client = supabaseService.getClient() else {
+        guard supabaseService.getClient() != nil else {
             print("⚠️ Supabase client not initialized; realtime disabled")
             return
         }

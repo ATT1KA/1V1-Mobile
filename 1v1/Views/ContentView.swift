@@ -114,7 +114,7 @@ struct ContentView: View {
 
 // MARK: - Notification Delegate
 @MainActor
-class NotificationDelegate: NSObject, @preconcurrency UNUserNotificationCenterDelegate {
+class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
     static let shared = NotificationDelegate()
     
     nonisolated func userNotificationCenter(
